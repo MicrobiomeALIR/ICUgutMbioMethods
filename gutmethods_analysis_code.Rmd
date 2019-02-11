@@ -1,0 +1,1683 @@
+---
+title: "gut_methods_12.2018"
+author: "Georgios Kitsios"
+date: "12/5/2018"
+output: html_document
+---
+
+# This file describes the analyses for  rectal swab vs stool sample comparisons for a brief report from the ALIR study.
+# it will build upon data generated from the delirium abstract
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(error = TRUE)
+
+# load workspace
+# set working directory where you have downloaded the environment dataset
+setwd("~/...your chosen location")
+getwd()
+
+
+
+```
+
+```{r}
+# load important libraries
+library(dplyr)
+library(readxl)
+library(plyr)
+library(ggplot2)
+library(psych)
+library(lubridate)
+library(stargazer)
+library(reshape2)
+library(ggbeeswarm)
+library(epitools)
+library(vegan)
+library(tidyr)
+library(gdata)
+library(stringr)
+library(scales)
+library(nlme)
+library(devtools)
+library(networkD3)
+```
+
+
+
+
+```{r}
+# examine how many subjects we have. 
+n_distinct(sampleid_metadata_alir_gut$SubjectID) #n=107
+table(sampleid_metadata_alir_gut$gutsampletype) #n=135 rectalswab, 38 stool
+
+```
+
+
+```{r}
+# merge the sampleid gut metadata file with the delirium subjectid file to obtain the delirium related data for each gut sample. this merge will be all.x based to ensure that no sampleids are lost when no delirium data available. 
+gut_sampleid_metadata <- merge(sampleid_metadata_alir_gut, delirium_alir_subjectid_input_4_2018, by = "SubjectID", all.x = TRUE)
+n_distinct(gut_sampleid_metadata$sample_id)
+n_distinct(gut_sampleid_metadata$SubjectID)
+tbl_df(gut_sampleid_metadata)
+
+# identify which patients have only rectal swabs, which have stool samples and which have both.
+table(gut_sampleid_metadata$SubjectID, gut_sampleid_metadata$gutsampletype)
+gut_sampleid_metadata %>% group_by(SubjectID, gutsampletype) %>% tally()
+
+# create a variable to indicate whether a case has rectal only, stool omly, or both
+n_distinct(gut_sampleid_metadata$SubjectID[gut_sampleid_metadata$gutsampletype=="rectalswab"]) #n=92
+n_distinct(gut_sampleid_metadata$SubjectID[gut_sampleid_metadata$gutsampletype=="stool"]) #n=25
+
+# to do that, i will filter the dataset into stool samples, rectal swab samples, and then merge to identify overlap.
+gut_sampleid_metadata_stool <- filter(gut_sampleid_metadata, gutsampletype=="stool")
+gut_sampleid_metadata_rectal <- filter(gut_sampleid_metadata, gutsampletype=="rectalswab")
+
+stool_subjectids <- as.data.frame(unique(gut_sampleid_metadata_stool$SubjectID))
+stool_subjectids <- rename(stool_subjectids, c(`unique(gut_sampleid_metadata_stool$SubjectID)` = "SubjectID"))
+
+#merge with rectal swabs to find out which have both
+gut_sampleid_metadata_bothtypes <- merge(stool_subjectids,gut_sampleid_metadata_rectal, by = "SubjectID", all.x = TRUE)
+n_distinct(gut_sampleid_metadata_bothtypes$SubjectID[gut_sampleid_metadata_bothtypes$gutsampletype=="rectalswab"]) #n=11 cases with both stool and rectal swabs
+
+# based on these dfs, i will define which subjectids have stool available (n=25) and which cases have both types of samples (n=11) in the main metadata file. 
+
+stool_subjectids <- unique(gut_sampleid_metadata_stool$SubjectID)
+bothtypessamples_subjectids <-unique(gut_sampleid_metadata_bothtypes$SubjectID[gut_sampleid_metadata_bothtypes$gutsampletype=="rectalswab"])
+
+# now define new fariable in the gut_sampleid_metadata file
+gut_sampleid_metadata <-mutate(gut_sampleid_metadata, stoolavail = ifelse(SubjectID %in% stool_subjectids, "yes", "no"))
+table(gut_sampleid_metadata$stoolavail, gut_sampleid_metadata$gutsampletype)
+n_distinct(gut_sampleid_metadata$SubjectID[gut_sampleid_metadata$stoolavail=="yes"]) #n-24
+
+gut_sampleid_metadata <-mutate(gut_sampleid_metadata, bothsamples = ifelse(SubjectID %in% bothtypessamples_subjectids, "yes", "no"))
+table(gut_sampleid_metadata$bothsamples, gut_sampleid_metadata$gutsampletype)
+n_distinct(gut_sampleid_metadata$SubjectID[gut_sampleid_metadata$bothsamples=="yes"]) #n=11
+n_distinct(gut_sampleid_metadata$SubjectID[gut_sampleid_metadata$bothsamples=="no" &gut_sampleid_metadata$stoolavail=="yes"]) #n=14
+
+
+# convert text variables to factors. 
+gut_sampleid_metadata[sapply(gut_sampleid_metadata,is.character)] <- lapply(gut_sampleid_metadata[sapply(gut_sampleid_metadata,is.character)], as.factor)
+# convert NAs to NA
+gut_sampleid_metadata <- mutate_all(gut_sampleid_metadata, funs(replace(., .=='NA', NA)))
+
+# fix followup intervals
+gut_sampleid_metadata$studydayanalysis[gut_sampleid_metadata$studydayanalysis=="very_late"] <-"late"
+gut_sampleid_metadata$studydayanalysis <-as.character(gut_sampleid_metadata$studydayanalysis)
+gut_sampleid_metadata$studydayanalysis <-as.factor(gut_sampleid_metadata$studydayanalysis)
+gut_sampleid_metadata$studydayanalysis <-ordered(gut_sampleid_metadata$studydayanalysis, levels = c("baseline", "middle", "late"))
+
+
+# define clinical sample only dataset
+gut_sampleid_metadata_clinical <- filter(gut_sampleid_metadata, !is.na(gutsampletype))
+
+# redefine the subsets of stool vs. rectal swabs so that they have variables fixed from the main df of gut_sampleid_metadata_clinical
+gut_sampleid_metadata_stool <- filter(gut_sampleid_metadata_clinical, gutsampletype=="stool")
+gut_sampleid_metadata_rectal <- filter(gut_sampleid_metadata_clinical, gutsampletype=="rectalswab")
+gut_sampleid_metadata_bothtypes <-filter(gut_sampleid_metadata_clinical, bothsamples=="yes")
+
+```
+
+
+```{r}
+######## examine demographics of patients with and without stool available
+table(gut_sampleid_metadata$stoolavail)
+gut_sampleid_metadata$StudyDay
+# i need to create a dataframe where there will be one row per subjectid 
+# http://stackoverflow.com/questions/21308436/dplyr-filter-get-rows-with-minimum-of-variable-but-only-the-first-if-multiple
+
+gut_subjectid_metadata <- group_by(gut_sampleid_metadata, SubjectID) %>% filter(StudyDay ==min(StudyDay)) %>% filter (1:n() ==1) #n=106 observations
+table(gut_subjectid_metadata$stoolavail)
+
+# now will compare the 24 patients with stool samples available vs. those with rectal swabs only. 
+
+# demographics table via stargazer
+# instructions here: https://stackoverflow.com/questions/22878037/using-stargazer-in-r-without-knowing-anything-about-latex
+# nice cheatsheet for stargazer: http://jakeruss.com/cheatsheets/stargazer.html#the-default-summary-statistics-table
+
+tbl_df(gut_subjectid_metadata)
+# stoolavail=yes - continuous variables
+
+#gut_subjectid_metadata %>% filter(stoolavail=="yes")  %>% stargazer(type = "text", title = "descriptivestats stoolavail", digits = 1, median = TRUE) 
+
+stargazer(subset(gut_subjectid_metadata[c("Age", "BMI", "intubationduration", "ICUstayduration", "VFD",  "SOFAScore", "lips_score", "HR", "SBP", "LowestMAP", "SaturationSpO2",  "PHa", "WBC", "Platelets", "Creatinine", "CO2", "WorstPaO2FiO2Ratio", "TotalRR", "PEEP", "PeakInspiratory", "PlateauPressure", "TVmlperkg")], gut_subjectid_metadata$stoolavail=="yes"), type = "text", nobs=TRUE, mean.sd = TRUE, min.max = FALSE, title = "Descriptive statistics Stool available", float = FALSE, digits = 1, out = "~/Desktop/Microbiome/ICU ARDS mbiome/projects/gut_methods/descriptivestats/stoolavaildescriptivetable1cont.txt")
+
+# ards table - categorical variables
+stargazer(subset(gut_subjectid_metadata[c("Gender", "HistDiabetes", "HistCOPD", "HistImmunosuppression", "HistCCF", "HistCRF", "IsActiveNeoplasm", "HistAlcohol", "Pneumonia", "IsSepsis", "Aspiration",  "Mortality30Day", "Mortality90Day", "AcuteKidneyInjury")], gut_subjectid_metadata$stoolavail=="yes"), type = "text", nobs=TRUE, mean.sd = TRUE, min.max = FALSE, title = "Descriptive statistics stoolavail yes", digits = 2, out = "~/Desktop/Microbiome/ICU ARDS mbiome/projects/gut_methods/descriptivestats/stoolavaildescriptivetable1categ.txt")
+
+
+
+# compare demographics with custom code. 
+# stool vs rectal swab subsets. 
+gut_subjectid_metadata_stool <- filter(gut_subjectid_metadata,stoolavail == "yes" )
+
+gut_subjectid_metadata_rectal <- filter(gut_subjectid_metadata,stoolavail == "no" )
+
+####### continuous variables
+continuous_variable <- c("Age", "BMI", "intubationduration", "ICUstayduration", "VFD",  "SOFAScore", "lips_score", "HR", "SBP", "LowestMAP", "SaturationSpO2",  "PHa", "WBC", "Platelets", "Creatinine", "CO2", "WorstPaO2FiO2Ratio", "TotalRR", "PEEP", "PeakInspiratory", "PlateauPressure", "TVmlperkg", "ang2", "il8", "il6", "procalcitonin", "st2", "fractalkine", "pentraxin3", "rage", "tnfr1")
+# , "totalfentanyladjbyday", "averageicdsc", "totalmidazolamadjbyday")
+# continuous_variable: anova among 2 groups, mean, sd
+for (i in  continuous_variable) {
+cohort_description_continuous <- function (x, y, z, k, name){
+  wilcox.test <- wilcox.test(k ~ gut_subjectid_metadata$stoolavail, na.action=na.omit)
+  # aov <- aov(k ~ gut_subjectid_metadata$stoolavail, na.action=na.omit)
+  # anova <- anova(aov)
+   # TukeyHSD <- TukeyHSD(aov)
+  median_x <- median(x, na.rm=TRUE)
+  median_y <- median(y, na.rm=TRUE)
+  IQR_x <- IQR(x, na.rm=TRUE)
+  IQR_y <- IQR(y, na.rm=TRUE)
+  list_cohort_description_continuous <- list("Variable" = name, "wilcox.test" = wilcox.test,  "median_stool" = median_x, "median_rectal" = median_y,"sd_stool" = IQR_x, "IQR_rectal" = IQR_y)
+   print (list_cohort_description_continuous)
+}
+cohort_description_continuous(x = gut_subjectid_metadata_stool[[i]], y = gut_subjectid_metadata_rectal[[i]],  k = as.numeric(gut_subjectid_metadata[[i]]) , name = i)
+}
+
+######categorical variables
+######categorical variables
+discrete_variable <- c("Gender", "HistDiabetes", "HistCOPD", "HistImmunosuppression", "HistCCF", "HistCRF", "IsActiveNeoplasm", "HistAlcohol", "Pneumonia", "IsSepsis", "VasopressorFirstWeek", "Aspiration",  "Mortality30Day", "Mortality90Day", "AcuteKidneyInjury", "deliriumdichot", "ardsphenotype", "diarrhea" )
+
+for (i in discrete_variable) {
+
+ cohort_description_discrete <- function(x, name) {
+  count_table <- table(gut_subjectid_metadata$stoolavail, x)
+  count_table
+  case <- count_table[,c(2)]
+  total <- rowSums(count_table)
+  prop.test <-prop.test(case, total)
+  
+  list_cohort_description_discrete = list("Variable" = name, "count" = count_table, "prop.test" = prop.test)
+  
+  print(list_cohort_description_discrete)
+ }
+ 
+cohort_description_discrete(x = as.numeric(gut_subjectid_metadata[[i]]), name = i)
+}
+
+
+# was there difference in stool samples available by enteral nutrition?
+fisher.test(gut_sampleid_metadata_clinical$stoolavail, gut_sampleid_metadata_clinical$earlyenteralnutrition) # p = 0.33 - thus no difference by early enteral nutrition. 
+# table(gut_sampleid_metadata_clinical_baseline$earlyenteralnutrition)
+# 39/(39+52)
+
+# difference in diarrhea by stool available?
+fisher.test(gut_sampleid_metadata_clinical$stoolavail, gut_sampleid_metadata_clinical$diarrhea) #p=0.009 as expected. 
+
+
+
+# for patients with stoolavail, look whether the rectal swabs predate or follow the stool samples, which seems to be the case by the table below, more stool samples later. 
+table(gut_sampleid_metadata_clinical$gutsampletype, gut_sampleid_metadata_clinical$studydayanalysis)
+
+```
+
+
+
+
+
+
+
+```{r}
+# match samples with microbiome data from the genus table file. alir_genus_otutable_mar18clean_t_gut
+all.equal(rownames(alir_genus_otutable_mar18clean_t_gut), rownames(gut_sampleid_metadata))
+
+sampleids_gut<- gut_sampleid_metadata$sample_id
+sampleids_gut <-as.data.frame(sampleids_gut)
+sampleids_gut$sample_id <- sampleids_gut$sampleids_gut
+sampleids_gut$sampleids_gut <- NULL
+gutmethods_genustable_mar18clean<- merge(sampleids_gut, alir_genus_otutable_mar18clean_t_gut, by="sample_id", all.x = TRUE)
+# ensure perfect match between metadata and taxa table
+all.equal(rownames(gutmethods_genustable_mar18clean), rownames(gut_sampleid_metadata))
+
+n_distinct(gutmethods_genustable_mar18clean$sample_id)
+n_distinct(gut_sampleid_metadata$sample_id)
+# n=259 sample ids. 
+
+# remove sample "0102.3747.1R.T" which has inadvertently been entered. i will use 3747.3.S instead.
+gut_sampleid_metadata <- filter(gut_sampleid_metadata, !grepl('0102.3747.1R.T', sample_id))
+gutmethods_genustable_mar18clean <- filter(gutmethods_genustable_mar18clean, !grepl('0102.3747.1R.T', sample_id))
+
+# add missing info for rectal/stool for 2 samples
+# "0102.3732.1.S" "0102.3995.3.S"
+gut_sampleid_metadata$gutsampletype[gut_sampleid_metadata$sample_id=="0102.3732.1.S"] <-"stool"
+gut_sampleid_metadata$gutsampletype[gut_sampleid_metadata$sample_id=="0102.3995.3.S"] <-"stool"
+
+# ensure appropriate matching
+# ensure perfect match between metadata and taxa table
+all.equal(rownames(gutmethods_genustable_mar18clean), rownames(gut_sampleid_metadata))
+
+n_distinct(gutmethods_genustable_mar18clean$sample_id)
+n_distinct(gut_sampleid_metadata$sample_id)
+# n=258
+
+```
+
+
+```{r}
+# compare stool by rectal samples in the entire cliincal dataset. 
+
+# first look at 16S reads yield 
+t.test(gut_sampleid_metadata_clinical$total ~ gut_sampleid_metadata_clinical$gutsampletype) # no statistical difference
+ggplot(gut_sampleid_metadata, aes(x=sampletype, y=total, fill = gutsampletype)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_jitter(width = 0.1,  size = 8, shape = 1)  + 
+  ylab("Total 16S reads") + 
+  xlab("Gut microbiome  - sample type") + 
+  theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + scale_fill_manual(values = c("#CC33CC", "#CC6600", "blue", "red", "yellow"))  + ggtitle("N of 16S reads by sample type")
+
+# look at yield of rectal swabs in those with or without stool samples
+# no difference in rectal swab yield between those that had a stool sample available vs. not
+ggplot(gut_sampleid_metadata_clinical, aes(x=gutsampletype, y=total, fill = stoolavail)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_jitter(width = 0.1,  size = 8, shape = 1)  + 
+  ylab("Total 16S reads") + 
+  xlab("Gut microbiome  - sample type") + 
+  theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + scale_fill_manual(values = c("#CC33CC", "#CC6600", "blue", "red", "yellow")) + ggtitle("N of 16S reads by sample type in pts with and without stool samples")
+
+
+# look at which are the poorly performing samples. 
+gut_sampleid_metadata_clinical$sample_id[gut_sampleid_metadata_clinical$total<500]
+# 0102.3195.3.S   0102.3770.3.S.2 0102.3773.1.S   0102.3801.1.S   0102.3862.3.S   0102.3878.7.S.1 0102.3878.7.S.3 0102.3878.7.S.2 0102.3934.7.S   0102.4237.5.R 
+# look at alpha diversity of these poorly performing samples
+gut_sampleid_metadata_clinical$total[is.na(gut_sampleid_metadata_clinical$shannon)]
+gut_sampleid_metadata_clinical$sample_id[is.na(gut_sampleid_metadata_clinical$shannon)]
+# these have been excluded from alpha diversity analyses
+
+# look at reads of very low alpha samples
+gut_sampleid_metadata_clinical$total[gut_sampleid_metadata_clinical$shannon<1.5]
+
+####### ALPHA DIVERSITY #################
+# look at alpha diversity for clinical samples only
+
+t.test(gut_sampleid_metadata_clinical$shannon ~ gut_sampleid_metadata_clinical$gutsampletype) #p=0.003 in all samples. 
+wilcox.test(gut_sampleid_metadata_clinical$shannon ~ gut_sampleid_metadata_clinical$gutsampletype) #p=0.002 in all samples. 
+
+# gut_sampleid_metadata_clinical %>% filter(gutsampletype== "rectalswab") %>% median(shannon, data = ., na.rm = TRUE)
+# median(gut_sampleid_metadata_clinical_phyla_rectal$shannon, na.rm = TRUE)
+ #IQR(gut_sampleid_metadata_clinical_phyla_rectal$shannon, na.rm = TRUE)
+# median(gut_sampleid_metadata_clinical_phyla_stool$shannon, na.rm = TRUE)
+# IQR(gut_sampleid_metadata_clinical_phyla_stool$shannon, na.rm = TRUE)
+
+#  alpha diversity stool vs rectal graph - all samples combined
+
+ggplot(gut_sampleid_metadata_clinical, aes(x=gutsampletype, y=shannon, fill = gutsampletype, colour =gutsampletype)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+ geom_point(position = position_jitterdodge()) +
+  ylab("Shannon index - alpha diversity") + 
+  xlab("sample type") + 
+  theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + scale_fill_manual(values = c("#CC33CC", "#CC6600"))  + 
+  scale_color_manual(values = c("#CC33CC", "#CC6600")) +
+  scale_x_discrete(labels = c("Rectal Swab", "Stool")) + 
+  geom_text(aes(1.5,4.5, label = "p<0.003"), size = 10, colour = "black") + 
+  ggtitle("alpha diversity in rectal swabs vs. stool samples (all)")
+
+
+
+
+# this comparison is informative, but note that there is some double counting of cases with >1 samples. 
+
+# examine pattern of diversity evolution overtime for all samples combined, then separately for rectal swabs and stool samples. 
+ggplot(gut_sampleid_metadata_clinical, aes(x=studydayanalysis, y=shannon)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_jitter(width = 0.1,  size = 8, shape = 1)  + 
+  ylab("Shannon index - alpha diversity") + 
+  xlab("followup") + 
+  theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) +
+  ggtitle("alpha div overtime - all samples") +
+  geom_text(aes(x=2.5, y = 4.8), label = "p=0.00004")
+
+  # compare diversity overtime regardless. 
+  model=lme(shannon~studydayanalysis, random=~1|SubjectID, data = gut_sampleid_metadata_clinical, method = "REML", na.action = na.omit)
+anova(model)
+fit <- aov(shannon~studydayanalysis, data = gut_sampleid_metadata_clinical)
+summary(fit)
+# decline overtime
+#  Df Sum Sq Mean Sq F value   Pr(>F)    
+ #studydayanalysis   2  18.63   9.314   8.356 0.000354 ***
+# Residuals        159 177.24   1.115  
+
+
+# diversity overtime in rectal swabs
+ggplot(gut_sampleid_metadata_rectal, aes(x=studydayanalysis, y=shannon)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_jitter(width = 0.1,  size = 8, shape = 1)  + 
+  ylab("Shannon index - alpha diversity") + 
+  xlab("followup") + 
+  theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) +
+  ggtitle("alpha div overtime in rectal swabs") +
+  geom_text(aes(x=2.5, y = 4.8), label = "p=0.005")
+
+
+# diversity in rectal swabs only overtime
+  model=lme(shannon~studydayanalysis, random=~1|SubjectID, data = gut_sampleid_metadata_rectal, method = "REML", na.action = na.omit)
+anova(model)
+fit <- aov(shannon~studydayanalysis, data = gut_sampleid_metadata_rectal)
+summary(fit)
+#  Df Sum Sq Mean Sq F value Pr(>F)   
+# studydayanalysis   2  10.07   5.035   5.553 0.0049 **
+# Residuals        124 112.44   0.907  
+
+# diversity overtime in stool 
+ggplot(gut_sampleid_metadata_stool, aes(x=studydayanalysis, y=shannon)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_jitter(width = 0.1,  size = 8, shape = 1)  + 
+  ylab("Shannon index - alpha diversity") + 
+  xlab("followup") + 
+  theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) +
+  ggtitle("alpha div overtime in stool samples") +
+  geom_text(aes(x=2.5, y = 4.8), label = "p=ns")
+  
+# diversity overtime in stool
+model=lme(shannon~studydayanalysis, random=~1|SubjectID, data = gut_sampleid_metadata_stool, method = "REML", na.action = na.omit)
+anova(model)
+fit <- aov(shannon~studydayanalysis, data = gut_sampleid_metadata_stool)
+summary(fit)
+# not significantly different for stool, p=0.5
+# so this means we may have been obtaining stool samples later in the course if critical illness by the time that diversity has decreased already - by demographics, i have to do some analyses on date of admission on these samples and approximate onset of critical illness. 
+
+#### look at subjectid dataset to avoid double counting of samples per patient - this by definition takes the first sample available by patient, regardless of sample type
+t.test(gut_subjectid_metadata$shannon ~ gut_subjectid_metadata$gutsampletype) #p=0.08 in all samples. 
+
+ggplot(gut_subjectid_metadata, aes(x=gutsampletype, y=shannon, fill = gutsampletype)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_jitter(width = 0.1,  size = 8, shape = 1)  + 
+  ylab("Shannon index - alpha diversity") + 
+  xlab("Gut microbiome  - sample type") + 
+  theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + scale_fill_manual(values = c("#CC33CC", "#CC6600"))  + 
+  scale_x_discrete(labels = c("Rectal Swab", "Stool")) + 
+  geom_text(aes(1.5,4.5, label = "p=0.08"), size = 10, colour = "black") +
+  ggtitle("alpha div by first sample avail per patient")
+
+
+#### look at patients with both types of sample
+
+t.test(gut_sampleid_metadata_bothtypes$shannon ~ gut_sampleid_metadata_bothtypes$gutsampletype) #p=0.14 in all samples. 
+# fill by type
+ggplot(gut_sampleid_metadata_bothtypes, aes(x=gutsampletype, y=shannon, fill = gutsampletype)) + 
+ geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_jitter(width = 0.1,  size = 8, shape = 1)  + 
+ylab("Shannon index - alpha diversity") + 
+     xlab("Gut microbiome  - sample type") + 
+     theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+     theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+     theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + scale_fill_manual(values = c("#CC33CC", "#CC6600"))  + 
+     scale_x_discrete(labels = c("Rectal Swab", "Stool")) + 
+     geom_text(aes(1.5,4.5, label = "p=0.14"), size = 10, colour = "black") + 
+  ggtitle("alpha div - rectal swab vs. stool in pt with both samples")
+
+
+# look at cases without stool samples, vs. those with stool samples, filled by sampletype
+ggplot(gut_sampleid_metadata_clinical, aes(x=stoolavail, y=shannon, fill = gutsampletype)) + 
+ geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_jitter(width = 0.1,  size = 8, shape = 1)  + 
+ylab("Shannon index - alpha diversity") + 
+     xlab("Gut microbiome  - sample type") + 
+     theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+     theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+     theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + scale_fill_manual(values = c("#CC33CC", "#CC6600"))  +
+  geom_text(aes(1.5,4.5, label = "p=0.001"), size = 10, colour = "black") +
+  ggtitle("alphadiv - rectal swabs vs stool - by whether stool avail")
+     # this is a very informative graph. it shows that it is whether a stool sample was available rather than whether the sample was stool or rectal per se that makes the differences in alpha diversity. 
+t.test(gut_sampleid_metadata_clinical$shannon ~ gut_sampleid_metadata_clinical$stoolavail) # p = 0.001
+
+# on that same line, look at those with and without stoolsample for alpha diversity overtime. 
+
+ggplot(gut_sampleid_metadata_clinical, aes(x=studydayanalysis, y=shannon, fill = studydayanalysis)) + 
+ geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_jitter(width = 0.1,  size = 8, shape = 1)  + 
+  facet_wrap(~gut_sampleid_metadata_clinical$stoolavail) +
+ylab("Shannon index - alpha diversity") + 
+     xlab("stool sample available") + 
+     theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+     theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+     theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + scale_fill_manual(values = c("#CC33CC", "#CC6600", "blue"))  + ggtitle("alpha div overtime by whether stool sample available")
+# so more pronounced loss of diversity if no stool sample available
+
+# lets ask the same question about nutrition. 
+ggplot(gut_sampleid_metadata_clinical, aes(x=studydayanalysis, y=shannon, fill = studydayanalysis)) + 
+ geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_jitter(width = 0.1,  size = 8, shape = 1)  + 
+  facet_wrap(~gut_sampleid_metadata_clinical$earlyenteralnutrition) +
+ylab("Shannon index - alpha diversity") + 
+     xlab("early enteral nutrition") + 
+     theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+     theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+     theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + scale_fill_manual(values = c("#CC33CC", "#CC6600", "blue"))  + ggtitle("alpha div overtime by early enteral nutrition")
+
+
+# fill by day
+ggplot(gut_sampleid_metadata_bothtypes, aes(x=gutsampletype, y=shannon, fill = studydayanalysis)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_jitter(width = 0.1,  size = 8, shape = 1)  + 
+  ylab("Shannon index - alpha diversity") + 
+  xlab("Gut microbiome  - sample type") + 
+  theme(legend.position = 'none', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + scale_fill_manual(values = c("#CC33CC", "#CC6600", "blue"))  + 
+  scale_x_discrete(labels = c("Rectal Swab", "Stool")) 
+
+
+#### look at day and breakdown by type
+ggplot(gut_sampleid_metadata_clinical, aes(x=studydayanalysis, y=shannon, fill = gutsampletype, colour =gutsampletype)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_point(position = position_jitterdodge()) +
+  ylab("Shannon index - alpha diversity") + 
+  xlab("Followup Interval") + 
+  theme(legend.position = 'right', legend.text= element_text(size = 14, face = "bold"), axis.text.x = element_text(size=14, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + 
+  scale_fill_manual(values = c("#CC33CC", "#CC6600"), name = "Sample Type", breaks = c("rectalswab", "stool"), labels = c("Rectal Swab", "Stool"))  +
+  scale_color_manual(values = c("#CC33CC", "#CC6600"), name = "Sample Type", breaks = c("rectalswab", "stool"), labels = c("Rectal Swab", "Stool")) +
+  geom_text(aes(1,4.5, label = "p=0.02"), size = 6, colour = "black") +
+  geom_text(aes(2,4.5, label = "p=ns"), size = 6, colour = "black") +
+  geom_text(aes(3,4.5, label = "p=ns"), size = 6, colour = "black") +
+stat_summary(fun.y=median, colour="black", linetype="dashed", geom="line", aes(group = gutsampletype)) +
+  ggtitle("alpha div overtime, by sample type")
+ # geom_line(aes(group=gut_sampleid_metadata_clinical$SubjectID), colour = "blue", linetype = "dashed")
+
+# do stats comparisons for alpha diversity at each interval
+  gut_sampleid_metadata_clinical %>% filter(studydayanalysis== "baseline") %>% wilcox.test(shannon~gutsampletype, data = .) # p = 0.02
+  gut_sampleid_metadata_clinical %>% filter(studydayanalysis== "middle") %>% wilcox.test(shannon~gutsampletype, data = .) # p = 0.59
+  gut_sampleid_metadata_clinical %>% filter(studydayanalysis== "late") %>% wilcox.test(shannon~gutsampletype, data = .) # p = 0.91
+
+
+# overall take home is that alpha diversity is different in rectal swabs vs stool samples, at baseline interval, but nt following that. comparisons impacted by low N of stool samples overall. 
+  
+  
+  # do a sensitivity analysis looking at patients with available samples at followup intervals. 
+  # look at those with late interval samples
+  gut_sampleid_metadata_clinical$SubjectID[gut_sampleid_metadata_clinical$studydayanalysis=="late"]
+ #  1031 1767 1971 3189 3195 3516 3641 3669 3671 3699 3734 3734 3771 3772 3774 3816 3861 3878 3878 3878 3925 3927 3931 3934 3934 4200
+  # create a dataset of those with all available followup times
+  gut_sampleid_metadata_clinical_allfollowup <- filter(gut_sampleid_metadata_clinical, SubjectID %in% c("1031",  "1767", "1971", "3189", "3195",  "3516", "3641", "3669", "3671", "3699", "3734", "3771", "3772", "3774", "3816",  "3861",  "3878",  "3878","3925",  "3927",  "3931", "3934", "4200"))
+  
+  # repeat the analysis of alpha diversity overtime in this dataset 
+  ggplot(gut_sampleid_metadata_clinical_allfollowup, aes(x=studydayanalysis, y=shannon, fill = gutsampletype, colour =gutsampletype)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_point(position = position_jitterdodge()) +
+  ylab("Shannon index - alpha diversity") + 
+  xlab("Followup Interval") + 
+  theme(legend.position = 'right', legend.text= element_text(size = 14, face = "bold"), axis.text.x = element_text(size=14, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + 
+  scale_fill_manual(values = c("#CC33CC", "#CC6600"), name = "Sample Type", breaks = c("rectalswab", "stool"), labels = c("Rectal Swab", "Stool"))  +
+  scale_color_manual(values = c("#CC33CC", "#CC6600"), name = "Sample Type", breaks = c("rectalswab", "stool"), labels = c("Rectal Swab", "Stool")) +
+  #   geom_line(aes(group=gut_sampleid_metadata_clinical_allfollowup$SubjectID), colour = "blue", linetype = "dashed")
+    geom_text(aes(1,4.5, label = "p=ns"), size = 6, colour = "black") +
+  geom_text(aes(2,4.5, label = "p=ns"), size = 6, colour = "black") +
+  geom_text(aes(3,4.5, label = "p=ns"), size = 6, colour = "black") + 
+    stat_summary(fun.y=median, colour="black", linetype="dashed", geom="line", aes(group = gutsampletype)) +
+     ggtitle("alpha div overtime, by sample type in pts with available followup samples") +
+    geom_text(aes(3,3.8, label = "p=0.005 for decline"), size = 6, colour = "black") 
+  # this is a very informative graph - in small subset of patients with all time points available, diversity continues to decline overtime, 
+  
+  
+  gut_sampleid_metadata_clinical_allfollowup %>% filter(studydayanalysis== "baseline") %>% wilcox.test(shannon~gutsampletype, data = .) # p = 0.57
+  gut_sampleid_metadata_clinical_allfollowup %>% filter(studydayanalysis== "middle") %>% wilcox.test(shannon~gutsampletype, data = .) # p = 0.75
+  gut_sampleid_metadata_clinical_allfollowup %>% filter(studydayanalysis== "late") %>% wilcox.test(shannon~gutsampletype, data = .) # p = 0.91
+  
+  # compare diversity overtime regardless. 
+  model=lme(shannon~studydayanalysis, random=~1|SubjectID, data = gut_sampleid_metadata_clinical_allfollowup, method = "REML", na.action = na.omit)
+anova(model)
+fit <- aov(shannon~studydayanalysis, data = gut_sampleid_metadata_clinical_allfollowup)
+summary(fit)
+ 
+# Df Sum Sq Mean Sq F value Pr(>F)   
+# studydayanalysis  2  12.44   6.219   5.841 0.0051 **
+# Residuals        53  56.43   1.065         
+
+###### look at available samples by study day
+gut_sampleid_metadata_clinical %>% ggplot(aes(factor(studydayanalysis), fill = factor(gutsampletype))) + geom_bar(position = "dodge2") + ggtitle("followup samples available")
+
+
+
+# think about whether those with rectal swabs differed by whether there was any bowel movement recorded during their ICU course or not. 
+gut_sampleid_metadata_clinical$Stooloutputrange_count <-as.numeric(gut_sampleid_metadata_clinical$Stooloutputrange_count)
+gut_sampleid_metadata_clinical$Stooloutputrange_volume <-as.numeric(gut_sampleid_metadata_clinical$Stooloutputrange_volume)
+
+# i will define stool volume as 0 if missing. 
+gut_sampleid_metadata_clinical$Stooloutputrange_volume[is.na(gut_sampleid_metadata_clinical$Stooloutputrange_volume)] <-0
+# i will define stool output as 0 if missing.
+gut_sampleid_metadata_clinical$Stooloutputrange_count[is.na(gut_sampleid_metadata_clinical$Stooloutputrange_count)] <-0
+
+# now define new variable as bowelmovrec (bowel movement recorded)
+gut_sampleid_metadata_clinical <- mutate(gut_sampleid_metadata_clinical, bowelmovrec = ifelse(gut_sampleid_metadata_clinical$Stooloutputrange_count==0, "no", "yes"))
+gut_sampleid_metadata_clinical$bowelmovrec
+# look at distribution with stoolavail for research to see if it makes sense
+table(gut_sampleid_metadata_clinical$bowelmovrec, gut_sampleid_metadata_clinical$stoolavail)
+# there are 3 samples of disagreement, which will be fixed - apply to 3189
+gut_sampleid_metadata_clinical$sample_id[gut_sampleid_metadata_clinical$bowelmovrec=="no" & gut_sampleid_metadata_clinical$stoolavail=="yes"]
+# change the assignment of bowelmovrec for this case
+gut_sampleid_metadata_clinical$bowelmovrec[gut_sampleid_metadata_clinical$SubjectID=="3189"] <- "yes"
+table(gut_sampleid_metadata_clinical$bowelmovrec, gut_sampleid_metadata_clinical$stoolavail)
+
+# now look at graph again after incorporating the bowelmovrec variable
+
+gut_sampleid_metadata_clinical %>% ggplot(aes(factor(studydayanalysis), fill = factor(bowelmovrec))) + geom_bar(position = "dodge2") + ggtitle("followup samples available")
+
+# look at distrubution of output and volume
+gut_sampleid_metadata_clinical$stooloutputadjbyday <-as.numeric(gut_sampleid_metadata_clinical$stooloutputadjbyday)
+gut_sampleid_metadata_clinical$stoolvolumeadjbyday <-as.numeric(gut_sampleid_metadata_clinical$stoolvolumeadjbyday)
+hist(gut_sampleid_metadata_clinical$stooloutputadjbyday)
+hist(gut_sampleid_metadata_clinical$stoolvolumeadjbyday)
+
+# define constipation
+gut_sampleid_metadata_clinical <-mutate(gut_sampleid_metadata_clinical, constipation = ifelse(gut_sampleid_metadata_clinical$Stooloutputrange_count<5 & gut_sampleid_metadata_clinical$Stooloutputrange_volume==0, "yes", "no"))
+gut_sampleid_metadata_clinical$constipation
+
+gut_sampleid_metadata_clinical %>% ggplot(aes(factor(studydayanalysis), fill = factor(constipation))) + geom_bar(position = "dodge2") + ggtitle("followup samples available") + facet_wrap(~gutsampletype)
+
+gut_sampleid_metadata_clinical %>% ggplot(aes(factor(studydayanalysis), fill = factor(bowelmovrec))) + geom_bar(position = "dodge2") + ggtitle("followup samples available") + facet_wrap(~gutsampletype)
+
+## the data on stool outpt by day etc not granular enough to help me distinguish between those with early vs. late bowel movements. 
+# i will limit the display into the early vs. later rectal swabs vs. stool samples. 
+
+gut_sampleid_metadata_clinical %>% ggplot(aes(factor(studydayanalysis), fill = factor(gutsampletype))) + geom_bar(position = "stack") + ggtitle("followup samples available")
+
+# gut_sampleid_metadata_clinical %>% ggplot(aes(factor(studydayanalysis), fill = factor(gutsampletype))) + geom_bar(aes(position_fill())) + ggtitle("followup samples available") 
+
+### use some of the code from the phenotypes project
+
+ggplot(gut_sampleid_metadata_clinical, aes(x=studydayanalysis, fill = gutsampletype)) + geom_bar(stat = "count") +
+  geom_text(aes(y = ((..count..)/sum(..count..)), label = scales::percent((..count../tapply(..count..,..PANEL..,sum)[..PANEL..]))), stat = "count", vjust = -0.55) + 
+  scale_fill_manual("gutsampletype", values = c("rectalswab"="purple", "stool" = "brown")) + 
+  theme_bw() + 
+  ylab("count") + xlab("Sample Type") +
+  theme(legend.position = "none") + 
+  theme(axis.text.x = element_blank(), axis.text.y = element_text(size=12), axis.title.x = element_text(colour="black", size = 18, face = "bold"), axis.title.y = element_text(size=14, face = "bold"), strip.text.x = element_text(size=12, colour = "black", face = "bold"))
+
+
+
+```
+
+```{r}
+##### add a sankey plot to make the transition of sample availability more evident
+
+### prepare df for sankey plot
+# select useful variables
+sankey_df_long <- dplyr::select(gut_sampleid_metadata_clinical, SubjectID, studydayanalysis, gutsampletype) 
+# transform long df to wide df
+# some patients just have samples in some stages, fill empty cells with NA which means samples are not available
+sankey_df_wide <- dcast(sankey_df_long, SubjectID ~studydayanalysis +gutsampletype )
+
+# add NAs
+sankey_df_wide$baseline_rectalswab[sankey_df_wide$baseline_rectalswab==0] <-NA
+sankey_df_wide$middle_rectalswab[sankey_df_wide$middle_rectalswab==0] <-NA
+sankey_df_wide$late_rectalswab[sankey_df_wide$late_rectalswab==0] <-NA
+sankey_df_wide$baseline_stool[sankey_df_wide$baseline_stool==0] <-NA
+sankey_df_wide$middle_stool[sankey_df_wide$middle_stool==0] <-NA
+sankey_df_wide$late_stool[sankey_df_wide$late_stool==0] <-NA
+
+
+# tutorials: https://www.r-bloggers.com/creating-custom-sankey-diagrams-using-r/
+########## sankey plot for gutsampletype ###########
+# create df nodes
+nodes <- data.frame("name" = 
+ c("baseline_rectal",
+ "baseline_stool",
+ "middle_rectal",
+ "middle_stool",
+ "late_rectal",
+ "late_stool", 
+ ""))
+
+# create df links
+# in each row, the first number represents initial node, the second number represents targeted node, the third number represents width(value) of link
+links <-
+as.data.frame(matrix(c(
+  
+  # from baseline to middle
+  0, 2, nrow(filter(sankey_df_wide, baseline_rectalswab == "1" & middle_rectalswab == "1" )),
+  0, 3, nrow(filter(sankey_df_wide, baseline_rectalswab == "1" & middle_stool == "1" )),
+  1, 2, nrow(filter(sankey_df_wide, baseline_stool == "1" & middle_rectalswab == "1" )),
+  1, 3, nrow(filter(sankey_df_wide, baseline_stool == "1" & middle_stool == "1")),
+  
+  # from middle to late
+  2, 4, nrow(filter(sankey_df_wide, middle_rectalswab == "1" & late_rectalswab == "1")),
+  2, 5, nrow(filter(sankey_df_wide, middle_rectalswab == "1" & late_stool == "1")),
+  3, 4, nrow(filter(sankey_df_wide, middle_stool == "1" & late_rectalswab == "1")), 
+  3, 5, nrow(filter(sankey_df_wide, middle_stool == "1" & late_stool == "1")),
+  
+  # baseline only
+  6, 0, nrow(filter(sankey_df_wide, baseline_rectalswab == "1")),
+  6, 1, nrow(filter(sankey_df_wide, baseline_stool == "1"))
+  
+  ),
+  
+  byrow = TRUE, ncol = 3))
+
+# rename df links
+names(links) = c("source", "target", "value")
+
+### for color
+# tutorials: https://www.r-graph-gallery.com/322-custom-colours-in-sankey-diagram/
+
+# assign group to node
+nodes$group = as.factor(c(
+ "node_1",
+ "node_0",
+ "node_1",
+ "node_0",
+ "node_1",
+ "node_0", 
+ "gutsampletype"
+ ))
+
+# assign group to links
+links$group = as.factor(c(
+
+ "1",
+ "crossover",
+ "crossover",
+ "0",
+  "1",
+ "crossover",
+ "crossover",
+ "0", 
+ "NA",
+ "NA"
+ 
+  ))
+
+# some links' value(width) = 0, but on the plot, it's shown as a very thin line. 
+# We don't want these thin lines, so remove links whose value == 0
+# links <- filter(links, value!= 0)
+
+# .domain specifies node groups and links groups
+# .range specifies colors, correspongding to groups
+Sankey_color <- 'd3.scaleOrdinal().domain(["node_1","node_0","1", "0", "crossover", "NA"]).range(["#CC3366", "#663300", "#FF99FF", "#996666", "#999999", "white"])'
+
+# call sankey plot 
+sankeyNetwork(Links = links, Nodes = nodes,
+ Source = "source", Target = "target",
+ Value = "value", NodeID = "name",
+ fontSize= 0, nodeWidth = 20, height = 300, width = 700, colourScale = Sankey_color, sinksRight = FALSE, NodeGroup="group", LinkGroup="group")
+
+#### obtain numbers of samples by studydayanalyses to put in plot
+gut_sampleid_metadata_clinical %>% group_by(studydayanalysis, gutsampletype) %>% tally()
+  
+10/91
+13/57
+15/26
+```
+
+
+
+
+```{r}
+# vegan comparison for rectal vs stool swabs
+# prelim vegan look
+# Beta diversity - perform analyses in vegan
+all.equal(rownames(gutmethods_genustable_mar18clean), rownames(gut_sampleid_metadata))
+
+#sort by Sample_ID variable and confirm they are equal
+gut_sampleid_metadata <- arrange(gut_sampleid_metadata, sample_id)
+gutmethods_genustable_mar18clean <- arrange(gutmethods_genustable_mar18clean, sample_id)
+gut_sampleid_metadata$sample_id
+gutmethods_genustable_mar18clean$sample_id <- as.character(gutmethods_genustable_mar18clean$sample_id)
+gutmethods_genustable_mar18clean$sample_id # confirmed that these are aligned properly. 
+
+# now remove sample_id from taxa table to ensure all are numeric
+gutmethods_genustable_mar18clean_vegan <- subset(gutmethods_genustable_mar18clean, select = -sample_id)
+######NMDS in entire dataset #########################
+# use PCOA in the entire taxa table to look for separation between clinical samples and experimental controls
+gutmethods_genustable_mar18clean_pcoa <- capscale(gutmethods_genustable_mar18clean_vegan ~ 1, distance = "bray")
+# define factor for ordination plot
+fac <-gut_sampleid_metadata$sampletype
+# create figure for supplement for separation of clinical vs experimental control samples. 
+plot(gutmethods_genustable_mar18clean_pcoa, disp="sites", type = "n", xlim=c(-1.5,1.5), ylim=c(-1.5,1.5))
+points(gutmethods_genustable_mar18clean_pcoa, disp="sites", pch=21, col = "grey",  cex = 0.9, select=which(fac=="mobioextrneg"))
+points(gutmethods_genustable_mar18clean_pcoa, disp="sites", pch=21, col = "purple",  cex = 0.9, select=which(fac=="pcrpos"))
+points(gutmethods_genustable_mar18clean_pcoa, disp="sites", pch=22, col = "black",  cex = 1.5, select=which(fac=="pcrneg"))
+points(gutmethods_genustable_mar18clean_pcoa, disp="sites", pch=22, col = "brown",  cex = 1.5, select=which(fac=="gut"))
+ordiellipse(gutmethods_genustable_mar18clean_pcoa, group=fac, show.groups="mobioextrneg", col = "grey", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_pcoa, group=fac, show.groups="pcrpos", col = "purple", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_pcoa, group=fac, show.groups="pcrneg", col = "black", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_pcoa, group=fac, show.groups="gut", col = "brown", lwd = 2)
+ordispider(gutmethods_genustable_mar18clean_pcoa, group=fac, show.groups="mobioextrneg", col = "grey", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_pcoa, group=fac, show.groups="pcrpos", col = "purple", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_pcoa, group=fac, show.groups="pcrneg", col = "black", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_pcoa, group=fac, show.groups="gut", col = "brown", label = TRUE)
+
+# perform permanova based on the variable sampletypecategory for formal comparison
+betadivbysampletypecategory <- betadiver(gutmethods_genustable_mar18clean_vegan, "z")
+adonis(betadivbysampletypecategory~sampletype, gut_sampleid_metadata, perm=1000)
+#                Df SumsOfSqs MeanSqs F.Model      R2   Pr(>F)    
+# sampletype   3    17.985  5.9948  22.392 0.20722 0.000999 ***
+
+
+# stool vs rectal samples. 
+# perform analysis in clinical dataset only. 
+# in order to have a matching clinical dataset for taxa, need to filter the taxa table by clinical sample_ids 
+
+gutmethodsampleid_clinical <- gut_sampleid_metadata_clinical$sample_id
+gutmethods_genustable_mar18clean_clinical <- filter(gutmethods_genustable_mar18clean, sample_id %in% gutmethodsampleid_clinical)
+all.equal(rownames(gutmethods_genustable_mar18clean_clinical), rownames(gut_sampleid_metadata_clinical))
+
+#sort by Sample_ID variable and confirm they are equal
+gut_sampleid_metadata_clinical <- arrange(gut_sampleid_metadata_clinical, sample_id)
+gutmethods_genustable_mar18clean_clinical <- arrange(gutmethods_genustable_mar18clean_clinical, sample_id)
+gut_sampleid_metadata_clinical$sample_id
+gutmethods_genustable_mar18clean_clinical$sample_id <- as.character(gutmethods_genustable_mar18clean_clinical$sample_id)
+gutmethods_genustable_mar18clean_clinical$sample_id # confirmed that these are aligned properly. 
+
+
+
+# now remove sample_id from taxa table to ensure all are numeric
+gutmethods_genustable_mar18clean_clinical_vegan <- subset(gutmethods_genustable_mar18clean_clinical, select = -sample_id)
+######NMDS in entire dataset #########################
+# use NMDS in the entire taxa table to look for separation between clinical samples and experimental controls
+gutmethods_genustable_mar18clean_clinical_pcoa <- capscale(gutmethods_genustable_mar18clean_clinical_vegan ~ 1, distance = "bray")
+# define factor for ordination plot
+fac <-gut_sampleid_metadata_clinical$gutsampletype
+
+# create figure for separation of stool vs rectal samples.  
+plot(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", type = "n", xlim=c(-2, 2), ylim=c(-2, 2))
+points(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", pch=21, col = "#CC33CC",  cex = 0.3, select=which(fac=="rectalswab"))
+points(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", pch=21, col = "#CC6600",  cex = 0.9, select=which(fac=="stool"))
+ordiellipse(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="rectalswab", col = "#CC33CC", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="stool", col = "#CC6600", lwd = 2)
+ordispider(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="rectalswab", col = "#CC33CC", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="stool", col = "#CC6600", label = TRUE)
+
+# perform permanova based on the variable sampletypecategory for formal comparison
+betadivbysampletypecategory <- betadiver(gutmethods_genustable_mar18clean_clinical_vegan, "z")
+adonis(betadivbysampletypecategory~gutsampletype, gut_sampleid_metadata_clinical, perm=1000)
+         #       Df SumsOfSqs MeanSqs F.Model      R2   Pr(>F)    
+# gutsampletype   1     1.962  1.9625  7.5247 0.04123 0.000999 ***
+
+# systematic difference between stool and rectal swab. 
+
+
+
+
+##### look at effect of day regardless of sampletype
+fac <-gut_sampleid_metadata_clinical$studydayanalysis
+plot(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", type = "n", xlim=c(-2, 2), ylim=c(-2, 2))
+points(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", pch=21, col = "#CC33CC",  cex = 1, select=which(fac=="baseline"))
+points(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", pch=21, col = "#CC6600",  cex = 1, select=which(fac=="middle"))
+points(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", pch=21, col = "blue",  cex = 1, select=which(fac=="late"))
+ordiellipse(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="baseline", col = "#CC33CC", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="middle", col = "#CC6600", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="late", col = "blue", lwd = 2)
+ordispider(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="baseline", col = "#CC33CC", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="middle", col = "#CC6600", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="late", col = "blue", label = TRUE)
+# perform permanova based on the variable studydayanalysis for formal comparison
+betadivbysampletypecategory <- betadiver(gutmethods_genustable_mar18clean_clinical_vegan, "z")
+adonis(betadivbysampletypecategory~studydayanalysis, gut_sampleid_metadata_clinical, perm=1000)
+#     Df SumsOfSqs MeanSqs F.Model      R2   Pr(>F)    
+# studydayanalysis   2     1.691 0.84537  3.2048 0.03593 0.000999 ***
+
+
+# look for indendendent effect of sampletype by stuydyday analysis
+
+####################### these are the stats to be used. 
+betadivbysampletypecategory <- betadiver(gutmethods_genustable_mar18clean_clinical_vegan, "z")
+adonis(betadivbysampletypecategory~studydayanalysis + gutsampletype + gutsampletype*studydayanalysis, gut_sampleid_metadata_clinical, perm=1000)
+ #      Df SumsOfSqs MeanSqs F.Model      R2   Pr(>F)    
+# studydayanalysis                 2     1.691 0.84537  3.2990 0.03593 0.000999 ***
+# gutsampletype                    1     1.653 1.65326  6.4517 0.03513 0.000999 ***
+# studydayanalysis:gutsampletype   2     0.411 0.20554  0.8021 0.00873 0.796204    
+
+
+
+######## visualize how rectal and stool evolve overtime in terms of compositional similarity
+# define early vs late sample in the gut_sampleid_metadata_clinical dataset
+
+gut_sampleid_metadata_clinical <- mutate(gut_sampleid_metadata_clinical, gutsampletime =ifelse(gut_sampleid_metadata_clinical$gutsampletype=="rectalswab" & gut_sampleid_metadata_clinical$studydayanalysis=="baseline", "rswab_early", NA))
+gut_sampleid_metadata_clinical <- mutate(gut_sampleid_metadata_clinical, gutsampletime =ifelse(gut_sampleid_metadata_clinical$gutsampletype=="rectalswab" & gut_sampleid_metadata_clinical$studydayanalysis=="middle", "rswab_middle", gut_sampleid_metadata_clinical$gutsampletime))
+gut_sampleid_metadata_clinical <- mutate(gut_sampleid_metadata_clinical, gutsampletime =ifelse(gut_sampleid_metadata_clinical$gutsampletype=="rectalswab" & gut_sampleid_metadata_clinical$studydayanalysis=="late", "rswab_late", gut_sampleid_metadata_clinical$gutsampletime))
+gut_sampleid_metadata_clinical <- mutate(gut_sampleid_metadata_clinical, gutsampletime =ifelse(gut_sampleid_metadata_clinical$gutsampletype=="stool" & gut_sampleid_metadata_clinical$studydayanalysis=="baseline", "stool_early", gut_sampleid_metadata_clinical$gutsampletime))
+gut_sampleid_metadata_clinical <- mutate(gut_sampleid_metadata_clinical, gutsampletime =ifelse(gut_sampleid_metadata_clinical$gutsampletype=="stool" & gut_sampleid_metadata_clinical$studydayanalysis=="middle", "stool_middle", gut_sampleid_metadata_clinical$gutsampletime))
+gut_sampleid_metadata_clinical <- mutate(gut_sampleid_metadata_clinical, gutsampletime =ifelse(gut_sampleid_metadata_clinical$gutsampletype=="stool" & gut_sampleid_metadata_clinical$studydayanalysis=="late", "stool_late", gut_sampleid_metadata_clinical$gutsampletime))
+gut_sampleid_metadata_clinical$gutsampletime
+
+# do vegan for genustables with stool and rectal overtime. 
+# define factor for ordination plot
+fac <- gut_sampleid_metadata_clinical$gutsampletime 
+
+# 
+plot(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", type = "n", xlim=c(-1.5,1.5), ylim=c(-1.5,1.5))
+points(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", pch=21, col = "grey",  cex = 0.9, select=which(fac=="rswab_early"))
+points(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", pch=21, col = "black",  cex = 0.9, select=which(fac=="rswab_middle"))
+points(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", pch=21, col = "red",  cex = 0.9, select=which(fac=="rswab_late"))
+points(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", pch=22, col = "purple",  cex = 1.5, select=which(fac=="stool_early"))
+points(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", pch=22, col = "brown",  cex = 1.5, select=which(fac=="stool_middle"))
+points(gutmethods_genustable_mar18clean_clinical_pcoa, disp="sites", pch=22, col = "blue",  cex = 1.5, select=which(fac=="stool_late"))
+ordiellipse(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="rswab_early", col = "grey", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="rswab_middle", col = "black", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="rswab_late", col = "red", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="stool_early", col = "purple", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="stool_middle", col = "brown", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="stool_late", col = "blue", lwd = 2)
+# ordispider(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="rswab_early", col = "grey", label = FALSE)
+# ordispider(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="rswab_middle", col = "black", label = FALSE)
+ #ordispider(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="rswab_late", col = "red", label = FALSE)
+# ordispider(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="stool_early", col = "purple", label = FALSE)
+ #ordispider(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="stool_middle", col = "brown", label = FALSE)
+# ordispider(gutmethods_genustable_mar18clean_clinical_pcoa, group=fac, show.groups="stool_late", col = "blue", label = FALSE)
+
+#### complicated graphs.
+
+# will include one graph for stool vs. rectal overall, then break it in baseline, middle late respectively
+```
+
+```{r}
+#### break the vegan files into a baseline and a followup dataset to compare for dissimilarities between baseline and followup samples between rectal swabs and stool samples
+gut_sampleid_metadata_clinical_baseline <- filter(gut_sampleid_metadata_clinical, studydayanalysis=="baseline")
+
+gutmethodsampleid_clinical_baseline <- gut_sampleid_metadata_clinical_baseline$sample_id
+gutmethods_genustable_mar18clean_clinical_baseline <- filter(gutmethods_genustable_mar18clean, sample_id %in% gutmethodsampleid_clinical_baseline)
+all.equal(rownames(gutmethods_genustable_mar18clean_clinical_baseline), rownames(gut_sampleid_metadata_clinical_baseline))
+
+#sort by Sample_ID variable and confirm they are equal
+gut_sampleid_metadata_clinical_baseline <- arrange(gut_sampleid_metadata_clinical_baseline, sample_id)
+gutmethods_genustable_mar18clean_clinical_baseline <- arrange(gutmethods_genustable_mar18clean_clinical_baseline, sample_id)
+gut_sampleid_metadata_clinical_baseline$sample_id
+gutmethods_genustable_mar18clean_clinical_baseline$sample_id <- as.character(gutmethods_genustable_mar18clean_clinical_baseline$sample_id)
+gutmethods_genustable_mar18clean_clinical_baseline$sample_id # confirmed that these are aligned properly. 
+
+
+# now remove sample_id from taxa table to ensure all are numeric
+gutmethods_genustable_mar18clean_clinical_basl_vegan <- subset(gutmethods_genustable_mar18clean_clinical_baseline, select = -sample_id)
+######PCOAin entire dataset #########################
+# use PCOA in the entire taxa table to look for separation between rectal vs stool samples
+gutmethods_genustable_mar18clean_clinical_basl_pcoa <- capscale(gutmethods_genustable_mar18clean_clinical_basl_vegan ~ 1, distance = "bray")
+# define factor for ordination plot
+fac <-gut_sampleid_metadata_clinical_baseline$gutsampletype
+
+# create figure for separation of stool vs rectal samples in baseline dataset  
+plot(gutmethods_genustable_mar18clean_clinical_basl_pcoa, disp="sites", type = "n", xlim=c(-2, 2), ylim=c(-2, 2))
+points(gutmethods_genustable_mar18clean_clinical_basl_pcoa, disp="sites", pch=21, col = "#CC33CC",  cex = 0.3, select=which(fac=="rectalswab"))
+points(gutmethods_genustable_mar18clean_clinical_basl_pcoa, disp="sites", pch=21, col = "#CC6600",  cex = 0.9, select=which(fac=="stool"))
+ordiellipse(gutmethods_genustable_mar18clean_clinical_basl_pcoa, group=fac, show.groups="rectalswab", col = "#CC33CC", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_clinical_basl_pcoa, group=fac, show.groups="stool", col = "#CC6600", lwd = 2)
+ordispider(gutmethods_genustable_mar18clean_clinical_basl_pcoa, group=fac, show.groups="rectalswab", col = "#CC33CC", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_clinical_basl_pcoa, group=fac, show.groups="stool", col = "#CC6600", label = TRUE)
+
+# perform permanova based on the variable sampletypecategory for formal comparison
+betadivbysampletypecategory <- betadiver(gutmethods_genustable_mar18clean_clinical_basl_vegan, "z")
+adonis(betadivbysampletypecategory~gutsampletype, gut_sampleid_metadata_clinical_baseline, perm=1000)
+#   Df SumsOfSqs MeanSqs F.Model      R2   Pr(>F)    
+# gutsampletype  1    0.7407 0.74072   3.093 0.03322 0.000999 ***
+
+##### repeat same analyses for late samples
+
+gut_sampleid_metadata_clinical_late <- filter(gut_sampleid_metadata_clinical, studydayanalysis !="baseline")
+
+gutmethodsampleid_clinical_late <- gut_sampleid_metadata_clinical_late$sample_id
+gutmethods_genustable_mar18clean_clinical_late <- filter(gutmethods_genustable_mar18clean, sample_id %in% gutmethodsampleid_clinical_late)
+all.equal(rownames(gutmethods_genustable_mar18clean_clinical_late), rownames(gut_sampleid_metadata_clinical_late))
+
+#sort by Sample_ID variable and confirm they are equal
+gut_sampleid_metadata_clinical_late <- arrange(gut_sampleid_metadata_clinical_late, sample_id)
+gutmethods_genustable_mar18clean_clinical_late <- arrange(gutmethods_genustable_mar18clean_clinical_late, sample_id)
+gut_sampleid_metadata_clinical_late$sample_id
+gutmethods_genustable_mar18clean_clinical_late$sample_id <- as.character(gutmethods_genustable_mar18clean_clinical_late$sample_id)
+gutmethods_genustable_mar18clean_clinical_late$sample_id # confirmed that these are aligned properly. 
+
+
+# now remove sample_id from taxa table to ensure all are numeric
+gutmethods_genustable_mar18clean_clinical_late_vegan <- subset(gutmethods_genustable_mar18clean_clinical_late, select = -sample_id)
+######PCOAin entire dataset #########################
+# use PCOA in the entire taxa table to look for separation between rectal vs stool samples
+gutmethods_genustable_mar18clean_clinical_late_pcoa <- capscale(gutmethods_genustable_mar18clean_clinical_late_vegan ~ 1, distance = "bray")
+# define factor for ordination plot
+fac <-gut_sampleid_metadata_clinical_late$gutsampletype
+
+# create figure for separation of stool vs rectal samples in late dataset  
+plot(gutmethods_genustable_mar18clean_clinical_late_pcoa, disp="sites", type = "n", xlim=c(-2, 2), ylim=c(-2, 2))
+points(gutmethods_genustable_mar18clean_clinical_late_pcoa, disp="sites", pch=21, col = "#CC33CC",  cex = 0.3, select=which(fac=="rectalswab"))
+points(gutmethods_genustable_mar18clean_clinical_late_pcoa, disp="sites", pch=21, col = "#CC6600",  cex = 0.9, select=which(fac=="stool"))
+ordiellipse(gutmethods_genustable_mar18clean_clinical_late_pcoa, group=fac, show.groups="rectalswab", col = "#CC33CC", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_clinical_late_pcoa, group=fac, show.groups="stool", col = "#CC6600", lwd = 2)
+ordispider(gutmethods_genustable_mar18clean_clinical_late_pcoa, group=fac, show.groups="rectalswab", col = "#CC33CC", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_clinical_late_pcoa, group=fac, show.groups="stool", col = "#CC6600", label = TRUE)
+
+# perform permanova based on the variable sampletypecategory for formal comparison
+betadivbysampletypecategory <- betadiver(gutmethods_genustable_mar18clean_clinical_late_vegan, "z")
+adonis(betadivbysampletypecategory~gutsampletype, gut_sampleid_metadata_clinical_late, perm=1000)
+```
+
+
+
+
+```{r}
+#### look at rectal swabs only for effect of day on betadiversity
+sampleids_gut_rectal<- gut_sampleid_metadata_rectal$sample_id
+sampleids_gut_rectal <-as.data.frame(sampleids_gut_rectal)
+sampleids_gut_rectal$sample_id <- sampleids_gut_rectal$sampleids_gut_rectal
+sampleids_gut_rectal$sampleids_gut_rectal <- NULL
+gutmethods_genustable_mar18clean_rectal<- merge(sampleids_gut_rectal, alir_genus_otutable_mar18clean_t_gut, by="sample_id", all.x = TRUE)
+# ensure perfect match between metadata and taxa table
+all.equal(rownames(gutmethods_genustable_mar18clean_rectal), rownames(gut_sampleid_metadata_rectal))
+
+#sort by Sample_ID variable and confirm they are equal
+gut_sampleid_metadata_rectal <- arrange(gut_sampleid_metadata_rectal, sample_id)
+gutmethods_genustable_mar18clean_rectal <- arrange(gutmethods_genustable_mar18clean_rectal, sample_id)
+gut_sampleid_metadata_rectal$sample_id
+gutmethods_genustable_mar18clean_rectal$sample_id <- as.character(gutmethods_genustable_mar18clean_rectal$sample_id)
+gutmethods_genustable_mar18clean_rectal$sample_id # confirmed that these are aligned properly. 
+
+
+
+# now remove sample_id from taxa table to ensure all are numeric
+gutmethods_genustable_mar18clean_rectal_vegan <- subset(gutmethods_genustable_mar18clean_rectal, select = -sample_id)
+######NMDS in entire dataset #########################
+# use NMDS in the entire taxa table to look for separation between clinical samples and experimental controls
+gutmethods_genustable_mar18clean_rectal_pcoa <- capscale(gutmethods_genustable_mar18clean_rectal_vegan ~ 1, distance = "bray")
+
+
+fac <-gut_sampleid_metadata_rectal$studydayanalysis
+plot(gutmethods_genustable_mar18clean_rectal_pcoa, disp="sites", type = "n", xlim=c(-2, 2), ylim=c(-2, 2))
+points(gutmethods_genustable_mar18clean_rectal_pcoa, disp="sites", pch=21, col = "#FFCCFF",  cex = 1, select=which(fac=="baseline"))
+points(gutmethods_genustable_mar18clean_rectal_pcoa, disp="sites", pch=21, col = "#990066",  cex = 2, select=which(fac=="middle"))
+points(gutmethods_genustable_mar18clean_rectal_pcoa, disp="sites", pch=21, col = "#660033",  cex = 3, select=which(fac=="late"))
+ordiellipse(gutmethods_genustable_mar18clean_rectal_pcoa, group=fac, show.groups="baseline", col = "#FFCCFF", lwd = 4)
+ordiellipse(gutmethods_genustable_mar18clean_rectal_pcoa, group=fac, show.groups="middle", col = "#990066", lwd = 4)
+ordiellipse(gutmethods_genustable_mar18clean_rectal_pcoa, group=fac, show.groups="late", col = "#660033", lwd = 6)
+ordispider(gutmethods_genustable_mar18clean_rectal_pcoa, group=fac, show.groups="baseline", col = "#FFCCFF", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_rectal_pcoa, group=fac, show.groups="middle", col = "#990066", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_rectal_pcoa, group=fac, show.groups="late", col = "#660033", label = TRUE)
+# perform permanova based on the variable studydayanalysis for formal comparison
+betadivbysampletypecategory <- betadiver(gutmethods_genustable_mar18clean_rectal_vegan, "z")
+adonis(betadivbysampletypecategory~studydayanalysis, gut_sampleid_metadata_rectal, perm=1000)
+
+# Df SumsOfSqs MeanSqs F.Model      R2   Pr(>F)    
+# studydayanalysis   2     1.033 0.51655  2.0531 0.02973 0.000999 ***
+
+
+# look at whether the rectal swabs differed between those with available and not availabel stool samples
+fac <-gut_sampleid_metadata_rectal$stoolavail
+plot(gutmethods_genustable_mar18clean_rectal_pcoa, disp="sites", type = "n", xlim=c(-2, 2), ylim=c(-2, 2))
+points(gutmethods_genustable_mar18clean_rectal_pcoa, disp="sites", pch=21, col = "#CC33CC",  cex = 1, select=which(fac=="yes"))
+points(gutmethods_genustable_mar18clean_rectal_pcoa, disp="sites", pch=21, col = "#CC6600",  cex = 1, select=which(fac=="no"))
+ordiellipse(gutmethods_genustable_mar18clean_rectal_pcoa, group=fac, show.groups="yes", col = "#CC33CC", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_rectal_pcoa, group=fac, show.groups="no", col = "#CC6600", lwd = 2)
+ordispider(gutmethods_genustable_mar18clean_rectal_pcoa, group=fac, show.groups="yes", col = "#CC33CC", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_rectal_pcoa, group=fac, show.groups="no", col = "#CC6600", label = TRUE)
+
+# no difference at all. 
+
+
+
+
+
+
+
+
+```
+
+```{r}
+# pcoa in stool samples only
+
+gut_sampleid_metadata_clinical_stool<- filter(gut_sampleid_metadata_clinical, gutsampletype=="stool")
+
+gutmethodsampleid_clinical_stool <- gut_sampleid_metadata_clinical_stool$sample_id
+unique(gut_sampleid_metadata_clinical_stool$sample_id)
+gutmethods_genustable_mar18clean_clinical_stool <- filter(gutmethods_genustable_mar18clean, sample_id %in% gutmethodsampleid_clinical_stool)
+unique(gutmethods_genustable_mar18clean_clinical_stool$sample_id)
+n_distinct(gutmethods_genustable_mar18clean_clinical_stool$sample_id)
+# remove duplicates
+gutmethods_genustable_mar18clean_clinical_stool <- distinct(gutmethods_genustable_mar18clean_clinical_stool, sample_id, .keep_all = TRUE)
+all.equal(rownames(gutmethods_genustable_mar18clean_clinical_stool), rownames(gut_sampleid_metadata_clinical_stool))
+
+
+#sort by Sample_ID variable and confirm they are equal
+gut_sampleid_metadata_clinical_stool <- arrange(gut_sampleid_metadata_clinical_stool, sample_id)
+gutmethods_genustable_mar18clean_clinical_stool <- arrange(gutmethods_genustable_mar18clean_clinical_stool, sample_id)
+gut_sampleid_metadata_clinical_stool$sample_id
+gutmethods_genustable_mar18clean_clinical_stool$sample_id <- as.character(gutmethods_genustable_mar18clean_clinical_stool$sample_id)
+gutmethods_genustable_mar18clean_clinical_stool$sample_id # confirmed that these are aligned properly. 
+
+
+
+# now remove sample_id from taxa table to ensure all are numeric
+gutmethods_genustable_mar18clean_stool_vegan <- subset(gutmethods_genustable_mar18clean_clinical_stool, select = -sample_id)
+######NMDS in entire dataset #########################
+# use NMDS in the entire taxa table to look for separation between clinical samples and experimental controls
+gutmethods_genustable_mar18clean_stool_pcoa <- capscale(gutmethods_genustable_mar18clean_stool_vegan ~ 1, distance = "bray")
+
+
+fac <-gut_sampleid_metadata_clinical_stool$studydayanalysis
+plot(gutmethods_genustable_mar18clean_stool_pcoa, disp="sites", type = "n", xlim=c(-1.5, 1.5), ylim=c(-1.5, 1.5))
+points(gutmethods_genustable_mar18clean_stool_pcoa, disp="sites", pch=21, col = "#FFCC99",  cex = 1, select=which(fac=="baseline"))
+points(gutmethods_genustable_mar18clean_stool_pcoa, disp="sites", pch=21, col = "#996633",  cex = 2, select=which(fac=="middle"))
+points(gutmethods_genustable_mar18clean_stool_pcoa, disp="sites", pch=21, col = "#663300",  cex = 3, select=which(fac=="late"))
+ordiellipse(gutmethods_genustable_mar18clean_stool_pcoa, group=fac, show.groups="baseline", col = "#FFCC99", lwd = 4)
+ordiellipse(gutmethods_genustable_mar18clean_stool_pcoa, group=fac, show.groups="middle", col = "#996633", lwd = 4)
+ordiellipse(gutmethods_genustable_mar18clean_stool_pcoa, group=fac, show.groups="late", col = "#663300", lwd = 6)
+ordispider(gutmethods_genustable_mar18clean_stool_pcoa, group=fac, show.groups="baseline", col = "#FFCC99", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_stool_pcoa, group=fac, show.groups="middle", col = "#996633", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_stool_pcoa, group=fac, show.groups="late", col = "#663300", label = TRUE)
+# perform permanova based on the variable studydayanalysis for formal comparison
+betadivbysampletypecategory <- betadiver(gutmethods_genustable_mar18clean_stool_vegan, "z")
+adonis(betadivbysampletypecategory~studydayanalysis, gut_sampleid_metadata_clinical_stool, perm=1000)
+# 
+# Df SumsOfSqs MeanSqs F.Model      R2 Pr(>F)
+# studydayanalysis  2    0.4445 0.22225 0.81095 0.04429 0.7912
+```
+
+
+
+```{r}
+### look at subjects with both types of samples
+# match samples with microbiome data from the genus table file. alir_genus_otutable_mar18clean_t_gut
+all.equal(rownames(alir_genus_otutable_mar18clean_t_gut), rownames(gut_sampleid_metadata_bothtypes))
+
+sampleids_gut_both<- gut_sampleid_metadata_bothtypes$sample_id
+sampleids_gut_both <-as.data.frame(sampleids_gut_both)
+sampleids_gut_both$sample_id <- sampleids_gut_both$sampleids_gut_both
+sampleids_gut_both$sampleids_gut_both <- NULL
+gutmethods_genustable_mar18clean_bothtypes<- merge(sampleids_gut_both, alir_genus_otutable_mar18clean_t_gut, by="sample_id", all.x = TRUE)
+# ensure perfect match between metadata and taxa table
+all.equal(rownames(gutmethods_genustable_mar18clean_bothtypes), rownames(gut_sampleid_metadata_bothtypes))
+
+#sort by Sample_ID variable and confirm they are equal
+gut_sampleid_metadata_bothtypes <- arrange(gut_sampleid_metadata_bothtypes, sample_id)
+gutmethods_genustable_mar18clean_bothtypes <- arrange(gutmethods_genustable_mar18clean_bothtypes, sample_id)
+gut_sampleid_metadata_bothtypes$sample_id
+gutmethods_genustable_mar18clean_bothtypes$sample_id <- as.character(gutmethods_genustable_mar18clean_bothtypes$sample_id)
+gutmethods_genustable_mar18clean_bothtypes$sample_id # confirmed that these are aligned properly. 
+
+
+
+# now remove sample_id from taxa table to ensure all are numeric
+gutmethods_genustable_mar18clean_bothtypes_vegan <- subset(gutmethods_genustable_mar18clean_bothtypes, select = -sample_id)
+######NMDS in entire dataset #########################
+# use NMDS in the entire taxa table to look for separation between clinical samples and experimental controls
+gutmethods_genustable_mar18clean_bothtypes_pcoa <- capscale(gutmethods_genustable_mar18clean_bothtypes_vegan ~ 1, distance = "bray")
+# define factor for ordination plot
+fac <-gut_sampleid_metadata_bothtypes$gutsampletype
+
+# create figure for separation of stool vs rectal samples.  
+plot(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", type = "n", xlim=c(-1.5, 1.5), ylim=c(-1.7, 1.7))
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=21, col = "#CC33CC",  cex = 0.3, select=which(fac=="rectalswab"))
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=21, col = "#CC6600",  cex = 0.9, select=which(fac=="stool"))
+ordiellipse(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="rectalswab", col = "#CC33CC", lwd = 2)
+ordiellipse(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="stool", col = "#CC6600", lwd = 2)
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="rectalswab", col = "#CC33CC", label = TRUE)
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="stool", col = "#CC6600", label = TRUE)
+
+# perform permanova based on the variable sampletypecategory for formal comparison
+betadivbysampletypecategory <- betadiver(gutmethods_genustable_mar18clean_bothtypes_vegan, "z")
+adonis(betadivbysampletypecategory~gutsampletype, gut_sampleid_metadata_bothtypes, perm=1000)
+
+#    Df SumsOfSqs MeanSqs F.Model      R2   Pr(>F)   
+# gutsampletype  1    0.7164 0.71636  2.6247 0.08571 0.002997 **
+
+
+### for patients with both sample types, look whether it is more important the sampletype or the patient variable for beta diversity
+fac <-gut_sampleid_metadata_bothtypes$SubjectID
+# 1767 1767 1767 3189 3189 3189 3195 3516 3516 3516 3669 3669 3669 3671 3671 3671 3861 3861 3195 3934 3934 3934 3934 4124 4124 4124 4200 4200 4200 4200
+
+plot(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", type = "n", xlim=c(-1.7, 1.7), ylim=c(-1.7, 1.7))
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=21, col = "red",  cex = 2, select=which(fac=="1767"))
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="1767", col = "red", label = TRUE)
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=21, col = "blue",  cex = 2, select=which(fac=="3189"))
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="3189", col = "blue", label = TRUE)
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=21, col = "orange",  cex = 2, select=which(fac=="3195"))
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="3195", col = "orange", label = TRUE)
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=21, col = "brown",  cex = 2, select=which(fac=="3516"))
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="3516", col = "brown", label = TRUE)
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=21, col = "purple",  cex = 2, select=which(fac=="3669"))
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="3669", col = "purple", label = TRUE)
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=21, col = "black",  cex = 2, select=which(fac=="3671"))
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="3671", col = "black", label = TRUE)
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=21, col = "green",  cex = 2, select=which(fac=="3861"))
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="3861", col = "green", label = TRUE)
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=21, col = "turquoise",  cex = 2, select=which(fac=="3195"))
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="3195", col = "turquoise", label = TRUE)
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=23, col = "orange",  cex = 2, select=which(fac=="3934"))
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="3934", col = "orange", label = TRUE)
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=23, col = "gray",  cex = 2, select=which(fac=="4124"))
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="4124", col = "gray", label = TRUE)
+points(gutmethods_genustable_mar18clean_bothtypes_pcoa, disp="sites", pch=23, col = "yellow",  cex = 2, select=which(fac=="4200"))
+ordispider(gutmethods_genustable_mar18clean_bothtypes_pcoa, group=fac, show.groups="4200", col = "yellow", label = TRUE)
+
+betadivbysampletypecategory <- betadiver(gutmethods_genustable_mar18clean_bothtypes_vegan, "z")
+adonis(betadivbysampletypecategory~SubjectID, gut_sampleid_metadata_bothtypes, perm=1000)
+
+ # Df SumsOfSqs MeanSqs F.Model     R2 Pr(>F)
+# SubjectID  1    0.2750 0.27502 0.95263 0.0329 0.4835
+# according to this analysis, it is most about sampletype than subjectid to determine beta-diversity. 
+
+
+
+# in a more complciated analysis, look for the independent effect of sampletype when adjusting for subjectid.
+
+betadivbysampletypecategory <- betadiver(gutmethods_genustable_mar18clean_bothtypes_vegan, "z")
+adonis(betadivbysampletypecategory~SubjectID + gutsampletype, gut_sampleid_metadata_bothtypes, perm=1000)
+      
+#   Df SumsOfSqs MeanSqs F.Model      R2   Pr(>F)   
+# SubjectID      1    0.2750 0.27502  1.0070 0.03290 0.383616   
+# gutsampletype  1    0.7098 0.70976  2.5989 0.08492 0.005994 **
+# significant efect of sampletype even when adjusting for subjectid. 
+
+```
+
+
+
+```{r}
+####### look at taxonomic associations. 
+
+# first look at phyla level for baseline comparisons. 
+# merge the phyla summary table with the gut_sampleid_metadata_clinical to obtain abundance information for main phyla 
+
+gut_sampleid_metadata_clinical_phyla <-merge(gut_sampleid_metadata_clinical, ALIR_w_LHMP_taxa_phylum_Sample_ID_summary_table, by="sample_id", all.x = TRUE)
+
+gut_sampleid_metadata_clinical_phyla$total
+
+# problem with 3 samples that are being double counted. 
+duplicated(gut_sampleid_metadata_clinical_phyla$sample_id)
+# remove duplicate observations
+gut_sampleid_metadata_clinical_phyla <- distinct(gut_sampleid_metadata_clinical_phyla, sample_id, .keep_all = TRUE)
+
+# look at major phyla relative abundance
+gut_sampleid_metadata_clinical_phyla$firmicutesabund <- gut_sampleid_metadata_clinical_phyla$`Bacteria;Firmicutes`/gut_sampleid_metadata_clinical_phyla$total
+gut_sampleid_metadata_clinical_phyla$bacteroidessabund <- gut_sampleid_metadata_clinical_phyla$`Bacteria;Bacteroidetes` /gut_sampleid_metadata_clinical_phyla$total
+gut_sampleid_metadata_clinical_phyla$proteobacteriaabund <- gut_sampleid_metadata_clinical_phyla$`Bacteria;Proteobacteria`/gut_sampleid_metadata_clinical_phyla$total
+gut_sampleid_metadata_clinical_phyla$actinobacteriaabund <- gut_sampleid_metadata_clinical_phyla$`Bacteria;Actinobacteria`/gut_sampleid_metadata_clinical_phyla$total
+# create other phyla variable
+gut_sampleid_metadata_clinical_phyla <- mutate(gut_sampleid_metadata_clinical_phyla, otherphyla = 1-(firmicutesabund + bacteroidessabund +proteobacteriaabund + actinobacteriaabund))
+hist(gut_sampleid_metadata_clinical_phyla$otherphyla)
+
+# firmicutes
+ggplot(gut_sampleid_metadata_clinical_phyla, aes(x=gutsampletype, y= firmicutesabund)) + geom_boxplot() + geom_jitter()
+fit<-aov(gut_sampleid_metadata_clinical_phyla$firmicutesabund~gut_sampleid_metadata_clinical_phyla$gutsampletype, na.action = "na.exclude")
+summary(fit)
+
+# Bacteroidetes
+ggplot(gut_sampleid_metadata_clinical_phyla, aes(x=gutsampletype, y= bacteroidessabund)) + geom_boxplot() + geom_jitter()
+fit<-aov(gut_sampleid_metadata_clinical_phyla$bacteroidessabund~gut_sampleid_metadata_clinical_phyla$gutsampletype, na.action = "na.exclude")
+summary(fit)
+
+# proteobacteriaabund
+ggplot(gut_sampleid_metadata_clinical_phyla, aes(x=gutsampletype, y= proteobacteriaabund)) + geom_boxplot() + geom_jitter()
+fit<-aov(gut_sampleid_metadata_clinical_phyla$proteobacteriaabund~gut_sampleid_metadata_clinical_phyla$gutsampletype, na.action = "na.exclude")
+summary(fit)
+
+# actinobacteriaabund
+ggplot(gut_sampleid_metadata_clinical_phyla, aes(x=gutsampletype, y= actinobacteriaabund)) + geom_boxplot() + geom_jitter()
+fit<-aov(gut_sampleid_metadata_clinical_phyla$actinobacteriaabund~gut_sampleid_metadata_clinical_phyla$gutsampletype, na.action = "na.exclude")
+summary(fit)
+##### statistically significant difference in actinobacteria abundance p=0.02
+# improve esthetics of graph and try to understand whether difference related to sample type alone or availability of stool samples. 
+
+#### publishable graph of actinobacteria abundance
+ggplot(gut_sampleid_metadata_clinical_phyla, aes(x=gutsampletype, y=actinobacteriaabund, fill = gutsampletype, color = gutsampletype)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+   geom_point(position = position_jitterdodge()) +
+  ylab("Actinobacteria rel abundance") + 
+  xlab("Gut microbiome  - sample type") + 
+  theme(legend.position = 'right', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + 
+   scale_fill_manual(values = c("#CC33CC", "#CC6600"), name = "Sample Type", breaks = c("rectalswab", "stool"), labels = c("Rectal Swab", "Stool"))  +
+  scale_color_manual(values = c("#CC33CC", "#CC6600"), name = "Sample Type", breaks = c("rectalswab", "stool"), labels = c("Rectal Swab", "Stool")) +
+  geom_text(aes(1.5,0.4, label = "p=0.02"), size = 10, colour = "black")
+
+
+# create publishable graph with breakdown by day
+ggplot(gut_sampleid_metadata_clinical_phyla, aes(x=gutsampletype, y=actinobacteriaabund, fill = studydayanalysis, color = studydayanalysis)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+   geom_point(position = position_jitterdodge()) +
+  ylab("Actinobacteria rel abundance") + 
+  xlab("") + 
+  theme(legend.position = 'right', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  scale_x_discrete(labels = c("Rectal Swab", "Stool")) +
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + 
+   scale_fill_manual(values = c("#66CC33", "#339900", "#336600"), name = "Interval", breaks = c("baseline", "middle", "late"), labels = c("baseline", "middle", "late"))  +
+  scale_color_manual(values = c("#66CC33", "#339900", "#336600"), name = "Interval", breaks = c("baseline", "middle", "late"), labels = c("baseline", "middle", "late")) 
+
+
+### look for reduction in actionobacteria overtime in the rectal swabs
+
+gut_sampleid_metadata_clinical_phyla_rectal <- filter(gut_sampleid_metadata_clinical_phyla, gutsampletype=="rectalswab")
+
+ model=lme(actinobacteriaabund~studydayanalysis, random=~1|SubjectID, data = gut_sampleid_metadata_clinical_phyla_rectal, method = "REML", na.action = na.omit)
+anova(model)
+# p=0.03 for reduction overtime. 
+gut_sampleid_metadata_clinical_phyla_stool <- filter(gut_sampleid_metadata_clinical_phyla, gutsampletype=="stool")
+
+ model=lme(actinobacteriaabund~studydayanalysis, random=~1|SubjectID, data = gut_sampleid_metadata_clinical_phyla_stool, method = "REML", na.action = na.omit)
+anova(model) # p = ns. 
+
+# in this same graph, breakit down by stool available or not
+ggplot(gut_sampleid_metadata_clinical_phyla, aes(x=stoolavail, y=actinobacteriaabund, fill = gutsampletype, color = gutsampletype)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+   geom_point(position = position_jitterdodge()) +
+  ylab("Actinobacteria rel abundance") + 
+  xlab("stool available") + 
+  theme(legend.position = 'right', axis.text.x = element_text(size=20, face="bold"), axis.text.y = element_text(face="bold", size = 20), axis.title.y = element_text(size=14),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + 
+    scale_fill_manual(values = c("#CC33CC", "#CC6600"), name = "Sample Type", breaks = c("rectalswab", "stool"), labels = c("Rectal Swab", "Stool"))  +
+  scale_color_manual(values = c("#CC33CC", "#CC6600"), name = "Sample Type", breaks = c("rectalswab", "stool"), labels = c("Rectal Swab", "Stool")) +
+  geom_text(aes(1.5,0.4, label = "p=0.02"), size = 10, colour = "black")
+### this brings it back to the idea, that if stool has been available, then actinobacteria abundance is low. 
+
+
+# look at fbratio
+gut_sampleid_metadata_clinical_phyla$fbratio <- gut_sampleid_metadata_clinical_phyla$firmicutesabund/gut_sampleid_metadata_clinical_phyla$bacteroidessabund
+hist(gut_sampleid_metadata_clinical_phyla$fbratio)
+median(gut_sampleid_metadata_clinical_phyla$fbratio, na.rm = TRUE)
+ggplot(gut_sampleid_metadata_clinical_phyla, aes(x=gutsampletype, y= fbratio)) + geom_boxplot() + geom_jitter()
+
+
+# look at firmicutes/actinobacteria ratio
+gut_sampleid_metadata_clinical_phyla$firm_actino_ratio <- gut_sampleid_metadata_clinical_phyla$firmicutesabund/gut_sampleid_metadata_clinical_phyla$actinobacteriaabund
+hist(gut_sampleid_metadata_clinical_phyla$firm_actino_ratio)
+ggplot(gut_sampleid_metadata_clinical_phyla, aes(x=gutsampletype, y=log(firm_actino_ratio))) + geom_jitter() + geom_boxplot()
+
+# create phyla level graph of taxonomic composition. 
+#  select only major 4 phyla and  other
+gut_sampleid_metadata_clinical_phyla_graph <- subset(gut_sampleid_metadata_clinical_phyla, select = c(sample_id,  firmicutesabund ,bacteroidessabund , proteobacteriaabund , actinobacteriaabund, otherphyla))
+duplicated(gut_sampleid_metadata_clinical_phyla_graph$sample_id)
+
+# transpose dataset 
+## https://stackoverflow.com/questions/7970179/transposing-a-dataframe-maintaining-the-first-column-as-heading
+# https://stackoverflow.com/questions/29511215/convert-row-names-into-first-column
+gut_sampleid_metadata_clinical_phyla_graph_transposed <- as.data.frame(t(gut_sampleid_metadata_clinical_phyla_graph[, -1]))
+colnames(gut_sampleid_metadata_clinical_phyla_graph_transposed) <- gut_sampleid_metadata_clinical_phyla_graph$sample_id
+gut_sampleid_metadata_clinical_phyla_graph_transposed$taxon <- rownames(gut_sampleid_metadata_clinical_phyla_graph_transposed)
+
+# melt dataset for visualizations
+gutsampletypephylagraph <- melt(gut_sampleid_metadata_clinical_phyla_graph_transposed, id.vars = "taxon", variable.name = "sample_id", value.name = "abundance")
+gutsampletypephylagraph$Taxa <- as.factor(gutsampletypephylagraph$taxon)
+ggplot(gutsampletypephylagraph, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity", colour = "black")
+
+# reorder taxa
+gutsampletypephylagraph$Taxa  <- ordered(gutsampletypephylagraph$Taxa , levels = c("firmicutesabund", "bacteroidessabund", "proteobacteriaabund" , "actinobacteriaabund", "otherphyla" ))
+ggplot(gutsampletypephylagraph, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity") + theme_classic() 
+
+
+
+#  break the graph in 3 facets. obtain stoolavail and sampletype
+sampletype_bysampleid <- subset(gut_sampleid_metadata_clinical_phyla, select = c(sample_id, gutsampletype, stoolavail, studydayanalysis))
+duplicated(sampletype_bysampleid$sample_id)
+n_distinct(gutsampletypephylagraph$sample_id) #n=172
+gutsampletypephylagraph <- merge(gutsampletypephylagraph, sampletype_bysampleid, by="sample_id", all.x = TRUE)
+
+ggplot(gutsampletypephylagraph, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity") + 
+  theme_classic() + 
+  facet_wrap(~gutsampletype, ncol=2, scales = "free")
+
+
+# fix labels. 
+gutsampletypephylagraph$Taxa <- as.character(gutsampletypephylagraph$Taxa)
+gutsampletypephylagraph$Taxa[gutsampletypephylagraph$Taxa=="firmicutesabund"] <- "Firmicutes"
+gutsampletypephylagraph$Taxa[gutsampletypephylagraph$Taxa=="bacteroidessabund"] <- "Bacteroides"
+gutsampletypephylagraph$Taxa[gutsampletypephylagraph$Taxa=="proteobacteriaabund"] <- "Proteobacteria"
+gutsampletypephylagraph$Taxa[gutsampletypephylagraph$Taxa=="actinobacteriaabund"] <- "Actinobacteria"
+gutsampletypephylagraph$Taxa[gutsampletypephylagraph$Taxa=="otherphyla"] <- "Other_Phyla"
+gutsampletypephylagraph$Taxa <- as.factor(gutsampletypephylagraph$Taxa)
+
+# create color pallette
+# http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+colorpalette_gutsampletypephyla <- c("#66CC00", "#003366", "#9900FF","#CCCCCC", "#FF0000")
+
+levels(gutsampletypephylagraph$Taxa)
+#### all
+ggplot(gutsampletypephylagraph, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity", colour = "black") +  
+  scale_fill_manual(breaks = c("Firmicutes", "Bacteroides", "Proteobacteria" , "Actinobacteria", "Other_Phyla" ), values = colorpalette_gutsampletypephyla) +
+   facet_wrap(~gutsampletype, ncol=2, scales = "free") + 
+  scale_x_discrete(breaks = NULL) + xlab("") + ylab("Relative Abundance") + 
+  theme(legend.position = 'right', axis.text.y = element_text(face="bold"))  + 
+  theme(title = element_text(size=14, face='bold'), legend.text = element_text(size=14, face="bold"), strip.text.x = element_text(size = 14, face = "bold", colour = "blue")) + 
+  ggtitle("Fig. 4: Taxonomic composition at Phyla level per sample type")
+
+# breakdown with facets for day and sampletype
+ggplot(gutsampletypephylagraph, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity", colour = "black") +  
+  scale_fill_manual(breaks = c("Firmicutes", "Bacteroides", "Proteobacteria" , "Actinobacteria", "Other_Phyla" ), values = colorpalette_gutsampletypephyla) +
+   facet_grid(studydayanalysis~gutsampletype, scales = "free_x", space = "free") + 
+  scale_x_discrete(breaks = NULL) + xlab("") + ylab("Relative Abundance") + 
+  theme(legend.position = 'right', axis.text.y = element_text(face="bold"))  + 
+  theme(title = element_text(size=14, face='bold'), legend.text = element_text(size=14, face="bold"), strip.text.x = element_text(size = 14, face = "bold", colour = "blue")) + 
+  ggtitle("Fig. 4: Taxonomic composition at Phyla level per sample type")
+
+
+
+# try to order graph by abundance of firmicutes
+# https://trinkerrstuff.wordpress.com/2013/08/14/how-do-i-re-arrange-ordering-a-plot-revisited/
+
+# https://sebastiansauer.github.io/ordering-bars/
+# to do that, i will define a new variable to multiply abundance with
+gutsampletypephylagraph <-mutate(gutsampletypephylagraph, phylanumeric = ifelse(Taxa =="Firmicutes", 1, NA))
+gutsampletypephylagraph <-mutate(gutsampletypephylagraph, phylanumeric = ifelse(Taxa =="Bacteroides", 2, gutsampletypephylagraph$phylanumeric))
+gutsampletypephylagraph <-mutate(gutsampletypephylagraph, phylanumeric = ifelse(Taxa =="Proteobacteria", 10, gutsampletypephylagraph$phylanumeric))
+gutsampletypephylagraph <-mutate(gutsampletypephylagraph, phylanumeric = ifelse(Taxa =="Actinobacteria", 100, gutsampletypephylagraph$phylanumeric))
+gutsampletypephylagraph <-mutate(gutsampletypephylagraph, phylanumeric = ifelse(Taxa =="Other_Phyla", 1, gutsampletypephylagraph$phylanumeric))
+# now multiply the phylanumeric by abunddance to create a numeric sorting variable
+gutsampletypephylagraph$ordersortingphyla <- gutsampletypephylagraph$phylanumeric * gutsampletypephylagraph$abundance
+
+## ### most informative graph showing high abundance of actinobacteria. 
+ggplot(gutsampletypephylagraph, aes(x=reorder(sample_id, +ordersortingphyla), y = abundance, fill = Taxa)) + geom_bar(stat="identity", colour = "black") +  
+  scale_fill_manual(breaks = c("Firmicutes", "Bacteroides", "Proteobacteria" , "Actinobacteria", "Other_Phyla" ), values = colorpalette_gutsampletypephyla) +
+  facet_wrap(~gutsampletype, ncol=2, scales = "free") +
+  scale_x_discrete(breaks = NULL) + xlab("") + ylab("Relative Abundance") 
+  theme(legend.position = 'right', axis.text.y = element_text(face="bold"))  + 
+  theme(title = element_text(size=14, face='bold'), legend.text = element_text(size=14, face="bold"), strip.text.x = element_text(size = 14, face = "bold", colour = "blue")) 
+
+ 
+
+
+##### break it down to rectal and stool only. 
+gutsampletypephylagraph_rectal <- filter(gutsampletypephylagraph, gutsampletype=="rectalswab")
+# graph for rectal by day
+ggplot(gutsampletypephylagraph_rectal, aes(x=reorder(sample_id, +ordersortingphyla), y = abundance, fill = Taxa)) + geom_bar(stat="identity", colour = "black") +  
+  facet_wrap(~studydayanalysis, ncol=3, scales = "free") +
+  scale_fill_manual(breaks = c("Firmicutes", "Bacteroides", "Proteobacteria" , "Actinobacteria", "Other_Phyla" ), values = colorpalette_gutsampletypephyla) +
+ theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  xlab("") + ylab("Relative Abundance") + 
+  theme(legend.position = 'right', axis.text.y = element_text(face="bold"))  + 
+  theme(title = element_text(size=14, face='bold'), legend.text = element_text(size=14, face="bold"), strip.text.x = element_text(size = 14, face = "bold", colour = "blue")) 
+
+# publishable graph for rectal by day
+ggplot(gutsampletypephylagraph_rectal, aes(x=reorder(sample_id, +ordersortingphyla), y = abundance, fill = Taxa)) + geom_bar(stat="identity", colour = "black") +  
+  facet_wrap(~studydayanalysis, ncol=3, scales = "free") +
+  scale_fill_manual(breaks = c("Firmicutes", "Bacteroides", "Proteobacteria" , "Actinobacteria", "Other_Phyla" ), values = colorpalette_gutsampletypephyla) +
+ theme(axis.text.x = element_blank()) +
+  xlab("") + ylab("Relative Abundance") + 
+  theme(legend.position = 'right', axis.text.y = element_text(face="bold"))  + 
+  theme(title = element_text(size=14, face='bold'), legend.text = element_text(size=14, face="bold"), strip.text.x = element_text(size = 14, face = "bold", colour = "blue")) 
+
+# break this down by available stool samples or not
+
+ggplot(gutsampletypephylagraph_rectal, aes(x=reorder(sample_id, +ordersortingphyla), y = abundance, fill = Taxa)) + geom_bar(stat="identity", colour = "black") +  
+  scale_fill_manual(breaks = c("Firmicutes", "Bacteroides", "Proteobacteria" , "Actinobacteria", "Other_Phyla" ), values = colorpalette_gutsampletypephyla) +
+  facet_wrap(~stoolavail, ncol=2, scales = "free") +
+  scale_x_discrete(breaks = NULL) + xlab("") + ylab("Relative Abundance") + 
+  theme(legend.position = 'right', axis.text.y = element_text(face="bold"))  + 
+  theme(title = element_text(size=14, face='bold'), legend.text = element_text(size=14, face="bold"), strip.text.x = element_text(size = 14, face = "bold", colour = "blue")) 
+
+### stool only 
+  gutsampletypephylagraph_stool <- filter(gutsampletypephylagraph, gutsampletype=="stool")
+ggplot(gutsampletypephylagraph_stool, aes(x=reorder(sample_id, +ordersortingphyla), y = abundance, fill = Taxa)) + geom_bar(stat="identity", colour = "black") +  
+  scale_fill_manual(breaks = c("Firmicutes", "Bacteroides", "Proteobacteria" , "Actinobacteria", "Other_Phyla" ), values = colorpalette_gutsampletypephyla) +
+  scale_x_discrete(breaks = NULL) + xlab("") + ylab("Relative Abundance") + 
+  theme(legend.position = 'right', axis.text.y = element_text(face="bold"))  + 
+  theme(title = element_text(size=14, face='bold'), legend.text = element_text(size=14, face="bold"), strip.text.x = element_text(size = 14, face = "bold", colour = "blue")) 
+  
+```
+
+
+
+```{r}
+##### look at 15 most common taxa  - genus level analyses for pathogens vs not. 
+# Bacteria; Bacteroidetes; Bacteroidia; Bacteroidales; Bacteroidaceae; Bacteroides
+# Bacteria; Firmicutes; Bacilli; Bacillales; Staphylococcaceae; Staphylococcus
+# Bacteria; Firmicutes; Bacilli; Lactobacillales; Enterococcaceae; Enterococcus
+# Bacteria; Proteobacteria; Gammaproteobacteria; Enterobacteriales; Enterobacteriaceae; Enterobacteriaceae_unclassified
+# Bacteria; Proteobacteria; Gammaproteobacteria; Enterobacteriales; Enterobacteriaceae; Escherichia-Shigella
+# Bacteria; Bacteroidetes; Bacteroidia; Bacteroidales; Prevotellaceae; Prevotella
+# Bacteria; Bacteroidetes; Bacteroidia; Bacteroidales; Porphyromonadaceae; Porphyromonas
+# Bacteria; Verrucomicrobia; Verrucomicrobiae; Verrucomicrobiales; Verrucomicrobiaceae; Akkermansia
+# Bacteria; Firmicutes; Bacilli; Lactobacillales; Lactobacillaceae; Lactobacillus
+# Bacteria; Firmicutes; Clostridia; Clostridiales; Lachnospiraceae; Lachnoclostridium
+#Bacteria; Firmicutes; Clostridia; Clostridiales; Family_XI; Anaerococcus
+#Bacteria; Actinobacteria; Actinobacteria; Corynebacteriales; Corynebacteriaceae; Corynebacterium_1
+#Bacteria; Firmicutes; Clostridia; Clostridiales; Family_XI; Finegoldia
+#Bacteria; Proteobacteria; Gammaproteobacteria; Pseudomonadales; Pseudomonadaceae; Pseudomonadaceae_unclassified
+#Bacteria; Bacteroidetes; Bacteroidia; Bacteroidales; Porphyromonadaceae; Parabacteroides
+
+
+# I will calculate relative abundance for these 15 taxa from the genus taxa table. then, i will merge these abundances with the metadata files for direct analyses. 
+# to calculate relative abundances, i first have to merge the original taxa file with a sampleid to obtain total 16S reads for denominators. 
+gut_sampleid_metadata_total16Sreads <- subset(gut_sampleid_metadata, select=c(sample_id, total))
+gutmethods_genustable_withtotal16sreads <-merge(alir_genus_otutable_mar18clean_t_gut, gut_sampleid_metadata_total16Sreads, by="sample_id", all.x = TRUE)
+
+### it is evident that there has been duplication
+duplicated(gutmethods_genustable_withtotal16sreads$sample_id)
+
+# remove duplicates
+gutmethods_genustable_withtotal16sreads <- distinct(gutmethods_genustable_withtotal16sreads, sample_id, .keep_all = TRUE)
+
+gutmethods_genustable_withtotal16sreads$Staphylococcus <- gutmethods_genustable_withtotal16sreads$Bacteria..Firmicutes..Bacilli..Bacillales..Staphylococcaceae..Staphylococcus/gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Bacteroides <- gutmethods_genustable_withtotal16sreads$Bacteria..Bacteroidetes..Bacteroidia..Bacteroidales..Bacteroidaceae..Bacteroides/gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Enterococcus <- gutmethods_genustable_withtotal16sreads$Bacteria..Firmicutes..Bacilli..Lactobacillales..Enterococcaceae..Enterococcus /gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Enterobacteriaceae <- gutmethods_genustable_withtotal16sreads$Bacteria..Proteobacteria..Gammaproteobacteria..Enterobacteriales..Enterobacteriaceae..Enterobacteriaceae_unclassified /gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Escherichia_Shigella <- gutmethods_genustable_withtotal16sreads$Bacteria..Proteobacteria..Gammaproteobacteria..Enterobacteriales..Enterobacteriaceae..Escherichia.Shigella /gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Prevotella <- gutmethods_genustable_withtotal16sreads$Bacteria..Bacteroidetes..Bacteroidia..Bacteroidales..Prevotellaceae..Prevotella /gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Porphyromonas <- gutmethods_genustable_withtotal16sreads$Bacteria..Bacteroidetes..Bacteroidia..Bacteroidales..Porphyromonadaceae..Porphyromonas /gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Akkermansia <- gutmethods_genustable_withtotal16sreads$Bacteria..Verrucomicrobia..Verrucomicrobiae..Verrucomicrobiales..Verrucomicrobiaceae..Akkermansia/gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Lactobacillus <- gutmethods_genustable_withtotal16sreads$Bacteria..Firmicutes..Bacilli..Lactobacillales..Lactobacillaceae..Lactobacillus /gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Lachnoclostridium <- gutmethods_genustable_withtotal16sreads$Bacteria..Firmicutes..Clostridia..Clostridiales..Lachnospiraceae..Lachnoclostridium /gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Anaerococcus <- gutmethods_genustable_withtotal16sreads$Bacteria..Firmicutes..Clostridia..Clostridiales..Family_XI..Anaerococcus /gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Corynebacterium_1 <- gutmethods_genustable_withtotal16sreads$Bacteria..Actinobacteria..Actinobacteria..Corynebacteriales..Corynebacteriaceae..Corynebacterium_1 /gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Finegoldia <- gutmethods_genustable_withtotal16sreads$Bacteria..Firmicutes..Clostridia..Clostridiales..Family_XI..Finegoldia /gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Pseudomonadaceae_ <- gutmethods_genustable_withtotal16sreads$Bacteria..Proteobacteria..Gammaproteobacteria..Pseudomonadales..Pseudomonadaceae..Pseudomonadaceae_unclassified /gutmethods_genustable_withtotal16sreads$total
+
+gutmethods_genustable_withtotal16sreads$Parabacteroides <- gutmethods_genustable_withtotal16sreads$Bacteria..Bacteroidetes..Bacteroidia..Bacteroidales..Porphyromonadaceae..Parabacteroides /gutmethods_genustable_withtotal16sreads$total
+
+
+gutmethods_genustable_withtotal16sreads$other_genera <- 1-(gutmethods_genustable_withtotal16sreads$Parabacteroides + gutmethods_genustable_withtotal16sreads$Pseudomonadaceae_ + gutmethods_genustable_withtotal16sreads$Finegoldia + gutmethods_genustable_withtotal16sreads$Corynebacterium_1 + gutmethods_genustable_withtotal16sreads$Anaerococcus + gutmethods_genustable_withtotal16sreads$Lachnoclostridium + gutmethods_genustable_withtotal16sreads$Lactobacillus + gutmethods_genustable_withtotal16sreads$Akkermansia + gutmethods_genustable_withtotal16sreads$Porphyromonas + gutmethods_genustable_withtotal16sreads$Prevotella + gutmethods_genustable_withtotal16sreads$Escherichia_Shigella + gutmethods_genustable_withtotal16sreads$Enterobacteriaceae + gutmethods_genustable_withtotal16sreads$Enterococcus + gutmethods_genustable_withtotal16sreads$Bacteroides + gutmethods_genustable_withtotal16sreads$Staphylococcus)
+
+# confirm that these all add to 1. 
+gutmethods_genustable_withtotal16sreads$other_genera + gutmethods_genustable_withtotal16sreads$Parabacteroides + gutmethods_genustable_withtotal16sreads$Pseudomonadaceae_ + gutmethods_genustable_withtotal16sreads$Finegoldia + gutmethods_genustable_withtotal16sreads$Corynebacterium_1 + gutmethods_genustable_withtotal16sreads$Anaerococcus + gutmethods_genustable_withtotal16sreads$Lachnoclostridium + gutmethods_genustable_withtotal16sreads$Lactobacillus + gutmethods_genustable_withtotal16sreads$Akkermansia + gutmethods_genustable_withtotal16sreads$Porphyromonas + gutmethods_genustable_withtotal16sreads$Prevotella + gutmethods_genustable_withtotal16sreads$Escherichia_Shigella + gutmethods_genustable_withtotal16sreads$Enterobacteriaceae + gutmethods_genustable_withtotal16sreads$Enterococcus + gutmethods_genustable_withtotal16sreads$Bacteroides + gutmethods_genustable_withtotal16sreads$Staphylococcus
+
+# retrieve these relative abundances in separate truncated taxa table. 
+gutmethods_genus_15taxarelabundance <- subset(gutmethods_genustable_withtotal16sreads, select = c(sample_id, other_genera , Parabacteroides , Pseudomonadaceae_ , Finegoldia ,Corynebacterium_1 ,Anaerococcus ,Lachnoclostridium ,Lactobacillus ,Akkermansia , Porphyromonas ,Prevotella ,Escherichia_Shigella ,Enterobacteriaceae ,Enterococcus ,Bacteroides ,Staphylococcus))
+
+# define pathogens. 
+gutmethods_genus_15taxarelabundance$pathogens <-  gutmethods_genus_15taxarelabundance$Pseudomonadaceae_ +    gutmethods_genus_15taxarelabundance$Escherichia_Shigella + gutmethods_genus_15taxarelabundance$Enterobacteriaceae + gutmethods_genus_15taxarelabundance$Enterococcus + gutmethods_genus_15taxarelabundance$Staphylococcus
+gutmethods_genus_15taxarelabundance$nonpathogenic_genera <- 1 - gutmethods_genus_15taxarelabundance$pathogens
+
+
+########## Merge this relative abundance table with the analysis file for all samples
+
+gut_sampleid_metadata_taxa <- merge(gut_sampleid_metadata, gutmethods_genus_15taxarelabundance, by="sample_id", all.x = TRUE)
+
+# no association between pathogen abundance and sampletype 
+ggplot(gut_sampleid_metadata_taxa, aes(x=gutsampletype, y=pathogens)) + geom_boxplot() + geom_jitter()
+ggplot(gut_sampleid_metadata_taxa, aes(x=stoolavail, y=pathogens)) + geom_boxplot() + geom_jitter()
+ggplot(gut_sampleid_metadata_taxa, aes(x=gutsampletype, y=nonpathogenic_genera)) + geom_boxplot() + geom_jitter()
+
+gut_sampleid_metadata_taxa_clinical <- filter(gut_sampleid_metadata_taxa, !is.na(gutsampletype))
+
+
+
+# publishable graph for pathogen abundance by sample type. 
+ggplot(gut_sampleid_metadata_taxa_clinical, aes(x=gutsampletype, y=pathogens, fill = gutsampletype, color = gutsampletype)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_point(position = position_jitterdodge()) +
+  ylab("Pathogen relative abundance") + 
+  xlab("Gut microbiome  - sample type") + 
+  theme(legend.position = 'none', axis.text.x = element_text(size=16, face="bold"), axis.text.y = element_text(face="bold", size = 16), axis.title.y = element_text(size=10),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + 
+  scale_fill_manual(values = c("#CC33CC", "#CC6600")) + 
+  scale_color_manual(values = c("#CC33CC", "#CC6600")) + 
+  scale_x_discrete(labels = c("Rectal Swab", "Stool")) 
+
+
+
+
+# look at individual pathogen taxa abundance differences. 
+fit <-aov(Staphylococcus ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical)
+summary(fit)
+fit <-aov(Pseudomonadaceae_ ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical)
+summary(fit)
+fit <-aov(Enterobacteriaceae ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical)
+summary(fit)
+fit <-aov(Enterococcus ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical) ### p = 0.004
+summary(fit)
+fit <-aov(Corynebacterium_1 ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical)
+summary(fit)
+fit <-aov(Bacteroides ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical) ## p=0.00383
+summary(fit)
+fit <-aov(Akkermansia ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical) ##p=10-6
+summary(fit)
+fit <-aov(Prevotella ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical) # p=0.009
+summary(fit)
+fit <-aov(Finegoldia ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical)
+summary(fit)
+fit <-aov(Porphyromonas ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical)
+summary(fit)
+fit <-aov(Lactobacillus ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical)
+summary(fit)
+fit <-aov(Lachnoclostridium ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical)
+summary(fit)
+fit <-aov(other_genera ~ gutsampletype, data = gut_sampleid_metadata_taxa_clinical) # p=0.002
+summary(fit)
+
+# enterococcus difference
+ggplot(gut_sampleid_metadata_taxa_clinical, aes(x=gutsampletype, y=Enterococcus, fill = gutsampletype, color = gutsampletype)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_point(position = position_jitterdodge()) +
+  ylab("Enterococcus relative abundance") + 
+  xlab("Gut microbiome  - sample type") + 
+  theme(legend.position = 'none', axis.text.x = element_text(size=16, face="bold"), axis.text.y = element_text(face="bold", size = 16), axis.title.y = element_text(size=10),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 20, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + 
+  scale_fill_manual(values = c("#CC33CC", "#CC6600")) + 
+  scale_color_manual(values = c("#CC33CC", "#CC6600")) + 
+  scale_x_discrete(labels = c("Rectal Swab", "Stool")) +
+  geom_text(aes(1.5, 0.75,  label = "p = 0.004"), size = 7, colour = "black")
+
+
+#### look for taxonomy at subset of patients with available followup data
+
+
+
+
+
+
+###### look at systematic differences in abundance for these 15 most common genera
+# remove pathogens category from this  dataset
+gutmethods_genus_15taxarelabundance$pathogens <-NULL
+gutmethods_genus_15taxarelabundance$nonpathogenic_genera <-NULL
+gutmethods_genus_15taxarelabundance_transposed <- as.data.frame(t(gutmethods_genus_15taxarelabundance[, -1]))
+colnames(gutmethods_genus_15taxarelabundance_transposed) <- gutmethods_genus_15taxarelabundance$sample_id
+gutmethods_genus_15taxarelabundance_transposed$taxon <- rownames(gutmethods_genus_15taxarelabundance_transposed)
+# melt dataset for visualizations
+gutmethods_genus_15taxarelabundance_long <- melt(gutmethods_genus_15taxarelabundance_transposed, id.vars = "taxon", variable.name = "sample_id", value.name = "abundance")
+gutmethods_genus_15taxarelabundance_long$Taxa <- as.factor(gutmethods_genus_15taxarelabundance_long$taxon)
+
+gut_sampleid_metadata_clinical_gutsampletypeinfo <- subset(gut_sampleid_metadata_clinical, select = c(sample_id, gutsampletype, studydayanalysis, SubjectID))
+gutmethods_genus_15taxarelabundance_long <-merge(gutmethods_genus_15taxarelabundance_long, gut_sampleid_metadata_clinical_gutsampletypeinfo, by = "sample_id", all.y = TRUE)
+
+
+View(gutmethods_genus_15taxarelabundance_long)
+ggplot(gutmethods_genus_15taxarelabundance_long, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity") + theme_classic() 
+
+#make relative abundance comparative plots of stool vs. rectal swabs
+
+ggplot(gutmethods_genus_15taxarelabundance_long, aes(x=gutsampletype, y=abundance, fill = gutsampletype, color = gutsampletype)) + 
+  geom_boxplot(lwd=0.8,  outlier.shape = 8, alpha = 0.6) + 
+  geom_point(position = position_jitterdodge()) +
+  facet_wrap(~Taxa) +
+  ylab("Taxa relative abundance") + 
+  xlab("") +
+  theme(legend.position = 'right', axis.text.x = element_blank(), axis.text.y = element_text(face="bold", size = 8), axis.title.y = element_text(size=10),  title =element_text(size=16, face='bold')) +
+  theme(strip.text = element_text(face="bold",  size = 10, colour = "blue")) + 
+  theme(panel.background = element_rect(fill = "white"), panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour="gray")) + 
+  scale_fill_manual(values = c("#CC33CC", "#CC6600"), name = "Sample Type", breaks = c("rectalswab", "stool"), labels = c("Rectal Swab", "Stool"))  +
+  scale_color_manual(values = c("#CC33CC", "#CC6600"), name = "Sample Type", breaks = c("rectalswab", "stool"), labels = c("Rectal Swab", "Stool")) 
+
+
+
+
+#### create relative abundance taxonomic plot at genus level for those with followup times. 
+
+gut_sampleid_metadata_taxa_clinical_allfollowup <- filter(gut_sampleid_metadata_taxa_clinical, SubjectID %in% c("1031",  "1767", "1971", "3189", "3195",  "3516", "3641", "3669", "3671", "3699", "3734", "3771", "3772", "3774", "3816",  "3861",  "3878",  "3878","3925",  "3927",  "3931", "3934", "4200"))
+gut_sampleid_metadata_taxa_clinical_allfollowup$sample_id
+
+# filter the long taxa abundance df by these 63 sampleids
+gut_sampleid_metadata_taxa_clinical_allfollowup_sampleids <- gut_sampleid_metadata_taxa_clinical_allfollowup$sample_id
+
+gutmethods_genus_15taxarelabundance_long_followup <- filter(gutmethods_genus_15taxarelabundance_long, sample_id %in% gut_sampleid_metadata_taxa_clinical_allfollowup_sampleids)
+
+ggplot(gutmethods_genus_15taxarelabundance_long_followup, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity") + theme_classic() +   facet_grid(gutsampletype~SubjectID, scales = "free_x", space = "free") 
+
+
+##### look at those SubjectIDs with stool and rectal swab available
+gut_sampleid_metadata_taxa_clinical_stoolavail <- filter(gut_sampleid_metadata_taxa_clinical, stoolavail=="yes")
+gut_sampleid_metadata_taxa_clinical_stoolavail$sample_id
+
+gut_sampleid_metadata_taxa_clinical_stoolavail_sampleids <- gut_sampleid_metadata_taxa_clinical_stoolavail$sample_id
+
+gutmethods_genus_15taxarelabundance_long_stoolavail <- filter(gutmethods_genus_15taxarelabundance_long, sample_id %in% gut_sampleid_metadata_taxa_clinical_stoolavail_sampleids)
+
+
+ggplot(gutmethods_genus_15taxarelabundance_long_stoolavail, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity") + theme_classic() +   facet_grid(gutsampletype~SubjectID, scales = "free_x", space = "free") 
+
+
+#### look further into those cases that have both sampels available
+gut_sampleid_metadata_taxa_clinical_bothavail <- filter(gut_sampleid_metadata_taxa_clinical, SubjectID %in% c("1767","3189", "3195",  "3516", "3669", "3671", "3861",   "3934", "4124", "4200"))
+gut_sampleid_metadata_taxa_clinical_bothavail$sample_id
+
+gut_sampleid_metadata_taxa_clinical_bothavail_sampleids <- gut_sampleid_metadata_taxa_clinical_bothavail$sample_id
+
+gutmethods_genus_15taxarelabundance_long_bothavail <- filter(gutmethods_genus_15taxarelabundance_long, sample_id %in% gut_sampleid_metadata_taxa_clinical_bothavail_sampleids)
+
+
+ggplot(gutmethods_genus_15taxarelabundance_long_bothavail, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity") + theme_classic() +   facet_grid(gutsampletype~SubjectID, scales = "free_x", space = "free") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+# remove duplicate samle for 4200.5.R
+gutmethods_genus_15taxarelabundance_long_bothavail <- filter(gutmethods_genus_15taxarelabundance_long_bothavail, sample_id != "0102.4200.5.R.2")
+gutmethods_genus_15taxarelabundance_long_bothavail <- filter(gutmethods_genus_15taxarelabundance_long_bothavail, sample_id != "0102.3934.7.S.2")
+ggplot(gutmethods_genus_15taxarelabundance_long_bothavail, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity") + theme_classic() +   facet_grid(gutsampletype~SubjectID, scales = "free_x", space = "free") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+##### use this graph for display
+# improve esthetics
+
+library(gdata)
+gutmethods_genus_15taxarelabundance_long_bothavail$Taxa <- ordered(gutmethods_genus_15taxarelabundance_long_bothavail$Taxa, levels = c("Escherichia_Shigella" , "Pseudomonadaceae_", "Enterobacteriaceae", "Staphylococcus", "Enterococcus" , "Bacteroides","Parabacteroides"  , "Finegoldia" ,"Akkermansia" , "Corynebacterium_1" ,"Anaerococcus", "Lachnoclostridium",  "Lactobacillus", "Porphyromonas", "Prevotella" , "other_genera"))
+
+ggplot(gutmethods_genus_15taxarelabundance_long_bothavail, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity") + theme_classic() +   facet_grid(gutsampletype~SubjectID, scales = "free_x", space = "free") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# create color pallette
+# http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/
+colorpalette_gutmethodstaxa <- c("#990066","#FF0066", "#FF0000", "#FF6666", 
+                              "#33CC33", "#336633", "#003300", "#99FF33", "#3399FF", "#0066CC", "#003366", "#66CCFF", "#00CCFF", "#00FFFF", "#CCFFFF",
+                              "#CCCCCC")
+
+
+ggplot(gutmethods_genus_15taxarelabundance_long_bothavail, aes(x=sample_id, y = abundance, fill = Taxa)) + geom_bar(stat="identity", colour = "black") + 
+  scale_fill_manual(breaks = c("Escherichia_Shigella" , "Pseudomonadaceae_", "Enterobacteriaceae", "Staphylococcus", "Enterococcus" , "Bacteroides","Parabacteroides"  , "Finegoldia" ,"Akkermansia" , "Corynebacterium_1" ,"Anaerococcus", "Lachnoclostridium",  "Lactobacillus", "Porphyromonas", "Prevotella" , "other_genera"), values = colorpalette_gutmethodstaxa) +
+  theme_classic() +   facet_grid(gutsampletype~SubjectID, scales = "free_x", space = "free") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+
+```
+
+##### bottomline
+# systematic differences of rectal swabs vs. stool samples, especially early on in the course of critical illness. 
+
